@@ -112,6 +112,7 @@ class Plugin:
             "id": "download_epg",
             "label": "Download EPG XML",
             "description": "Fetch Zap2it data and write XML under /data/epgs. Updates/creates the EPG source(s).",
+            "async": True,
             "confirm": {
                 "required": True,
                 "title": "Download EPG XML?",
