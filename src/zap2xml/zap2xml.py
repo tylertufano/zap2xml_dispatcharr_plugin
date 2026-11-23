@@ -511,8 +511,22 @@ def write_xmltv(channels: List[Dict[str, Any]], out_path: Path) -> None:
         name = ch.get("callSign") or ch.get("affiliateName") or ch.get("channelNo") or ch.get("stationId") or ch.get("channelId") or ""
         return str(name).casefold()
     channels = sorted(channels, key=_chan_sort_key)
+    # tylertufano fork: Gracenote's grid lists a station once per lineup position (channelId), so the same
+    # station came out as several <channel> elements with one id and duplicate programmes, and the lineup's
+    # channel number was never written. One <channel> per station, carrying every number it has in this lineup
+    # ("1402", "1402 AETVHD") and its raw callsign, so a client can map by number; programmes once per station.
+    by_station: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
     for ch in channels:
-        cid = str(ch.get("stationId") or ch.get("channelId") or "")
+        sid = str(ch.get("stationId") or ch.get("channelId") or "")
+        if sid not in by_station:
+            by_station[sid] = {"ch": ch, "numbers": []}
+            order.append(sid)
+        num = ch.get("channelNo")
+        if num not in (None, "") and str(num) not in by_station[sid]["numbers"]:
+            by_station[sid]["numbers"].append(str(num))
+    for cid in order:
+        ch = by_station[cid]["ch"]
         ch_el = ET.SubElement(tv, "channel", {"id": cid})
 
         def dn(val):
@@ -525,13 +539,20 @@ def write_xmltv(channels: List[Dict[str, Any]], out_path: Path) -> None:
         dn(affiliate)
         if call_sign and affiliate:
             dn(f"{call_sign} {affiliate}")
+        for num in by_station[cid]["numbers"]:
+            dn(num)
+            if call_sign:
+                dn(f"{num} {call_sign}")
+        # The station-name rewrite replaces only the first display-name; keep the raw callsign too.
+        if call_sign and by_station[cid]["numbers"]:
+            dn(call_sign)
 
         thumb = ch.get("thumbnail")
         if thumb:
             ET.SubElement(ch_el, "icon", {"src": _ensure_asset_url(str(thumb))})
 
-    # Programmes
-    for ch in channels:
+    # Programmes (once per station: every lineup position of a station carries the same schedule)
+    for ch in [by_station[s]["ch"] for s in order]:
         events = sorted(ch.get("events", []), key=lambda e: e.get("startTime") or "")
         for ev in events:
             program = ev.get("program") or {}

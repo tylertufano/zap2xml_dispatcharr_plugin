@@ -37,7 +37,7 @@ DEFAULT_UA = (
 
 class Plugin:
     name = "Zap2XML"
-    version = "2.1.4"
+    version = "2.1.4.1"
     description = "Create an XMLTV EPG from Zap2it (single or multiple lineups)."
 
     # Settings rendered by UI
@@ -137,6 +137,32 @@ class Plugin:
             pass
 
     def run(self, action: str, params: dict, context: dict):
+        # tylertufano fork: one download at a time across ALL Dispatcharr worker processes. Each worker starts its
+        # own scheduler thread, and every tick that lost the zap2xml.py lock used to run _cleanup_plugin_workspace,
+        # deleting the running download's xmltv_*.xml files. A tick or click that can't take this lock now returns
+        # without touching the workspace.
+        if action == "download_epg":
+            import fcntl
+            lock_fd = open(os.path.join(os.path.dirname(__file__), ".download.lock"), "w")
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                lock_fd.close()
+                logger = (context or {}).get("logger")
+                if logger:
+                    try: logger.info("[zap2xml] a download is already running; skipped (workspace untouched)")
+                    except Exception: pass
+                return {"status": "ok", "message": "A download is already running; skipped."}
+            try:
+                return self._run_action(action, params, context)
+            finally:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                finally:
+                    lock_fd.close()
+        return self._run_action(action, params, context)
+
+    def _run_action(self, action: str, params: dict, context: dict):
         if action not in ("download_epg", "apply_channel_mappings"):
             return {"status": "error", "message": f"Unknown action: {action}"}
 
