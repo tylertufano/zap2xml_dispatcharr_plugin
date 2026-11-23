@@ -16,6 +16,15 @@ Download channels.db and update in your Dispatcharr /data/plugins/zap2xml folder
 
 
 
+### **Fork**
+
+This fork adds lineup channel numbers to Gracenote station display names and serializes downloads across
+Dispatcharr worker processes. Install updates from the plugin repository:
+
+`https://raw.githubusercontent.com/tylertufano/zap2xml_dispatcharr_plugin/tufanito/manifest.json`
+
+
+
 ### **Usage**
 
 

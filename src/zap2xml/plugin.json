@@ -1,0 +1,102 @@
+{
+  "manifest_version": 1,
+  "name": "Zap2XML",
+  "version": "2.1.4.1",
+  "description": "Create an XMLTV EPG from Zap2it (single or multiple lineups).\n\nFORK BUILD (tylertufano): adds lineup channel numbers to Gracenote station display names and serializes downloads across Dispatcharr worker processes.",
+  "author": "jesmannstl (fork: tylertufano)",
+  "help_url": "https://github.com/tylertufano/zap2xml_dispatcharr_plugin/blob/tufanito/README.md",
+  "capabilities": [
+    "subprocess",
+    "outbound_network",
+    "filesystem_write",
+    "background_tasks"
+  ],
+  "fields": [
+    {
+      "id": "lineup_ids",
+      "label": "Lineup IDs",
+      "type": "text",
+      "default": "",
+      "placeholder": "",
+      "help_text": "Only enter lineupId strings. Country and ZIP/postal are auto-derived per lineup."
+    },
+    {
+      "id": "merge_lineups",
+      "label": "Merge multiple lineups into a single XMLTV",
+      "type": "boolean",
+      "default": true,
+      "help_text": "If enabled, all generated lineups are merged into one XML and one EPG Source."
+    },
+    {
+      "id": "timespan",
+      "label": "Total hours to fetch",
+      "type": "number",
+      "default": 72,
+      "help_text": "Total hours of guide data to fetch (requested in 6-hour chunks)."
+    },
+    {
+      "id": "delay",
+      "label": "Delay between requests (sec)",
+      "type": "number",
+      "default": 5,
+      "help_text": "Seconds to sleep between chunk requests to Zap2it."
+    },
+    {
+      "id": "user_agent",
+      "label": "HTTP User-Agent (optional)",
+      "type": "string",
+      "help_text": "Override HTTP User-Agent when fetching from Zap2it. Leave blank to use the plugin's global default."
+    },
+    {
+      "id": "refresh_interval_hours",
+      "label": "Refresh Interval (hours)",
+      "type": "number",
+      "default": 24,
+      "help_text": "Auto-refresh interval for the EPG source (0 to disable)."
+    },
+    {
+      "id": "auto_download_enabled",
+      "label": "Auto-Download XML on Schedule",
+      "type": "boolean",
+      "default": true,
+      "help_text": "When enabled, download a new XMLTV file on the saved interval."
+    },
+    {
+      "id": "epg_name",
+      "label": "EPG Name",
+      "type": "string",
+      "default": "Zap2XML",
+      "help_text": "Base name for the EPG Source(s) added to Dispatcharr."
+    },
+    {
+      "id": "confirm",
+      "label": "Require confirmation",
+      "type": "boolean",
+      "default": true,
+      "help_text": "Confirm before generating and importing the EPG"
+    }
+  ],
+  "actions": [
+    {
+      "id": "download_epg",
+      "label": "Download EPG XML",
+      "description": "Fetch Zap2it data and write XML under /data/epgs. Updates/creates the EPG source(s).",
+      "async": true,
+      "confirm": {
+        "required": true,
+        "title": "Download EPG XML?",
+        "message": "This fetches a new XMLTV file using the listed lineup IDs and updates the EPG source(s)."
+      }
+    },
+    {
+      "id": "apply_channel_mappings",
+      "label": "Set Channels + Logos",
+      "description": "Match channels by name to EPG tvg_ids and set logos.",
+      "confirm": {
+        "required": true,
+        "title": "Set channels + logos?",
+        "message": "Matches by channel name. Sets EPG and logos from channels.db or XMLTV icons."
+      }
+    }
+  ]
+}
