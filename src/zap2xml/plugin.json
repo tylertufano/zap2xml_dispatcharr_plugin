@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "Zap2XML",
-  "version": "2.1.4.2",
+  "version": "2.1.4.3",
   "description": "Create an XMLTV EPG from Zap2it (single or multiple lineups).\n\nFORK BUILD (tylertufano): adds lineup channel numbers to Gracenote station display names and serializes downloads across Dispatcharr worker processes.",
   "author": "jesmannstl (fork: tylertufano)",
   "help_url": "https://github.com/tylertufano/zap2xml_dispatcharr_plugin/blob/tufanito/README.md",
@@ -74,11 +74,26 @@
       "type": "select",
       "default": "provider_default",
       "options": [
-        {"value": "provider_default", "label": "Provider Default"},
-        {"value": "dark", "label": "Dark"},
-        {"value": "white", "label": "White"},
-        {"value": "gray", "label": "Gray"},
-        {"value": "light", "label": "Light"}
+        {
+          "value": "provider_default",
+          "label": "Provider Default"
+        },
+        {
+          "value": "dark",
+          "label": "Dark"
+        },
+        {
+          "value": "white",
+          "label": "White"
+        },
+        {
+          "value": "gray",
+          "label": "Gray"
+        },
+        {
+          "value": "light",
+          "label": "Light"
+        }
       ],
       "help_text": "Choose a station logo style for the XMLTV guide."
     },
@@ -95,9 +110,18 @@
       "type": "select",
       "default": "provider_default",
       "options": [
-        {"value": "provider_default", "label": "Provider Default"},
-        {"value": "landscape_iconic", "label": "Landscape Iconic"},
-        {"value": "landscape_banner", "label": "Landscape Banner with Title"}
+        {
+          "value": "provider_default",
+          "label": "Provider Default"
+        },
+        {
+          "value": "landscape_iconic",
+          "label": "Landscape Iconic"
+        },
+        {
+          "value": "landscape_banner",
+          "label": "Landscape Banner with Title"
+        }
       ],
       "help_text": "Choose an artwork style for listings on stations mapped to this guide."
     },
