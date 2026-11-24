@@ -41,6 +41,16 @@ Dispatcharr worker processes. Install updates from the plugin repository:
 
 **EPG Name:** Name saved to the Dispatcharr /data/epgs folder.  Default is Zap2xml and if multiple lineups will save as \_merged
 
+#### Artwork preferences
+
+- **Station Logo Style** offers Provider Default, Dark, White, Gray, and Light. This sets the station icon in the XMLTV guide. Dispatcharr's EPG logo controls handle assigning those icons to channels.
+- **Include Programme Artwork** is on by default. Turn it off to omit programme icons.
+- **Programme Artwork Style** offers Provider Default, Landscape Iconic (art without title text), and Landscape Banner with Title. Alternative artwork is checked only for stations already mapped to the matching Zap2XML EPG source, including the merged source. New sources use supplied artwork until stations are mapped and the guide refreshes again.
+
+Saved settings take effect on the next manual or scheduled Zap2XML download. Provider Default uses the supplied icon URLs as-is. An alternative is used only after its image type and signature are verified. Missing, unavailable, or unrecognized variants fall back to the supplied icon.
+
+Each refresh allows up to 128 artwork requests and 25 seconds of cumulative request time across all lineups, with up to 2 seconds per request. The plugin checks mapped station logos first. With both styles enabled and mapped stations present, station logos can use at most 96 requests and two-thirds of the lookup time, leaving the rest available for programme artwork. A wall-clock timeout stops requests for that artwork type. HTTP 429 stops discovery requests for both types. The persistent cache holds up to 8,192 results, with verified images cached for 30 days and confirmed misses for two days. The refresh log counts icon selections, fallbacks, cache hits, and instances skipped when a request budget runs out.
+
 
 
 ### **FAQ's**

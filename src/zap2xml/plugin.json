@@ -69,6 +69,39 @@
       "help_text": "Base name for the EPG Source(s) added to Dispatcharr."
     },
     {
+      "id": "station_logo_style",
+      "label": "Station Logo Style",
+      "type": "select",
+      "default": "provider_default",
+      "options": [
+        {"value": "provider_default", "label": "Provider Default"},
+        {"value": "dark", "label": "Dark"},
+        {"value": "white", "label": "White"},
+        {"value": "gray", "label": "Gray"},
+        {"value": "light", "label": "Light"}
+      ],
+      "help_text": "Choose a station logo style for the XMLTV guide."
+    },
+    {
+      "id": "include_programme_artwork",
+      "label": "Include Programme Artwork",
+      "type": "boolean",
+      "default": true,
+      "help_text": "Include artwork icons on listings in the XMLTV guide."
+    },
+    {
+      "id": "programme_artwork_style",
+      "label": "Programme Artwork Style",
+      "type": "select",
+      "default": "provider_default",
+      "options": [
+        {"value": "provider_default", "label": "Provider Default"},
+        {"value": "landscape_iconic", "label": "Landscape Iconic"},
+        {"value": "landscape_banner", "label": "Landscape Banner with Title"}
+      ],
+      "help_text": "Choose an artwork style for listings on stations mapped to this guide."
+    },
+    {
       "id": "confirm",
       "label": "Require confirmation",
       "type": "boolean",
