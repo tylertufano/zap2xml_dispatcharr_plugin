@@ -1,12 +1,15 @@
 import json
 import logging
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
 import xml.etree.ElementTree as ET
 from email.message import Message
 from pathlib import Path
+from textwrap import dedent
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, call, patch
 
@@ -179,7 +182,7 @@ class ArtworkTests(unittest.TestCase):
                     (expected.replace("_aa.jpg", "_ab.jpg"), "image/jpeg"),
                     (expected, "image/jpeg"),
                 ])
-                self.assertEqual(refresh.selected, 1)
+                self.assertEqual(refresh.selected, 2)
 
     def test_artwork_off_omits_programme_icons_and_still_selects_station_style(self):
         baseline = ET.parse(self.path)
@@ -233,12 +236,41 @@ class ArtworkTests(unittest.TestCase):
 
         self.write_guide()
         self.probe.reset_mock()
-        with patch.object(artwork, "_atomic_output", side_effect=PermissionError):
+        with patch.object(artwork, "_publish_output", side_effect=PermissionError):
             refresh = self.refresh(station_logo_style="white")
             refresh.apply(self.path, set())
         self.assertFalse(refresh.cache_writable)
         self.assertEqual(icon_urls(self.path, "channel"), {"32645": ESPN, "20454": WBBM})
         self.probe.assert_not_called()
+
+    def test_cache_failure_after_probing_keeps_original_logos_and_removes_programme_icons(self):
+        publish = artwork._publish_output
+        cache_writes = 0
+
+        def publish_output(output, path, mode=None):
+            nonlocal cache_writes
+            if path == self.cache:
+                cache_writes += 1
+                if cache_writes == 2:
+                    raise PermissionError("fixture cache error")
+            publish(output, path, mode)
+
+        refresh = self.refresh(station_logo_style="dark", include_programme_artwork=False)
+        with patch.object(artwork, "_publish_output", side_effect=publish_output):
+            refresh.apply(self.path, set())
+        self.assertEqual(self.probe.call_count, 2)
+        self.assertFalse(refresh.cache_writable)
+        self.assertEqual(icon_urls(self.path, "channel"), {"32645": ESPN, "20454": WBBM})
+        self.assertEqual(icon_urls(self.path, "programme"), {})
+        self.assertEqual(set(self.root.iterdir()), {self.path, self.cache})
+
+    def test_late_parse_error_preserves_original_guide_and_removes_staging_file(self):
+        original = self.path.read_bytes().replace(b"</tv>", b"<unclosed>")
+        self.path.write_bytes(original)
+        with self.assertRaises(ET.ParseError):
+            self.refresh(include_programme_artwork=False).apply(self.path, set())
+        self.assertEqual(self.path.read_bytes(), original)
+        self.assertEqual(list(self.root.iterdir()), [self.path])
 
     def test_expired_cache_entries_are_probed_again(self):
         self.probe.return_value = "missing"
@@ -259,6 +291,92 @@ class ArtworkTests(unittest.TestCase):
         self.assertEqual(refresh.requests, 1)
         self.assertEqual(refresh.budget_skipped, 1)
         self.assertEqual(icon_urls(self.path, "channel"), {"32645": ESPN, "20454": WBBM})
+
+    def test_station_elapsed_share_leaves_time_for_programme_requests(self):
+        refresh = self.refresh(station_logo_style="white", programme_artwork_style="landscape_iconic")
+        refresh.reserve_programme = True
+        refresh.lookup_seconds = refresh.station_seconds = 17
+        refresh.apply(self.path, {"32645"})
+        self.assertEqual(icon_urls(self.path, "channel"), {"32645": ESPN, "20454": WBBM})
+        self.assertEqual(icon_urls(self.path, "programme")["32645"], ICONIC.replace("_aa.jpg", "_ab.jpg"))
+        self.probe.assert_called_once()
+        self.assertEqual(self.probe.call_args.args[1], "image/jpeg")
+        self.assertLess(refresh.lookup_seconds, artwork.MAX_LOOKUP_SECONDS)
+
+    def test_hard_station_timeout_leaves_programme_style_available(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def probe(_url, content_type, _deadline):
+            return release.wait(5) if content_type == "image/png" else "valid"
+
+        self.probe.side_effect = probe
+        refresh = self.refresh(station_logo_style="white", programme_artwork_style="landscape_iconic")
+        with patch.object(artwork, "REQUEST_SECONDS", 0.1):
+            refresh.apply(self.path, {"32645"})
+        self.assertEqual(refresh.requests, 2)
+        self.assertEqual(refresh.timed_out_types, {"image/png"})
+        self.assertEqual(icon_urls(self.path, "programme")["32645"], ICONIC.replace("_aa.jpg", "_ab.jpg"))
+
+    def test_skipped_distinct_programmes_do_not_grow_probe_memo(self):
+        with self.path.open("wb") as fixture:
+            fixture.write(b"<tv>")
+            for asset in range(500):
+                url = POSTER.replace("21040818", str(asset))
+                fixture.write(f'<programme channel="32645"><icon src="{url}" /></programme>'.encode())
+            fixture.write(b"</tv>")
+        refresh = self.refresh(programme_artwork_style="landscape_iconic")
+        with patch.object(artwork, "MAX_REQUESTS", 1):
+            refresh.apply(self.path, {"32645"})
+        self.assertEqual(refresh.budget_skipped, 499)
+        self.assertEqual(len(refresh.probed_assets), 1)
+
+    def test_large_xml_rewrite_has_bounded_peak_memory(self):
+        rewrite = dedent("""
+            import resource
+            import sys
+            from pathlib import Path
+            from src.zap2xml.artwork import ArtworkRefresh
+
+            guide = Path(sys.argv[1])
+            refresh = ArtworkRefresh({"include_programme_artwork": False}, guide.with_suffix(".json"))
+            refresh.apply(guide, set())
+            peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            print(peak_rss // (1024 if sys.platform == "darwin" else 1))
+            with guide.open("rb") as output:
+                assert output.readline().startswith(b"<?xml")
+                assert output.readline() == b'<tv generator-info-name="fixture">\\n'
+                assert output.readline().strip() == b'<channel id="1"><icon src="station.png" /></channel>'
+                count = 0
+                for line in output:
+                    if line.startswith(b"  <programme"):
+                        assert b"<icon" not in line
+                        count += 1
+                assert count == int(sys.argv[2])
+        """)
+        programme = (
+            b'<programme channel="1" start="20261124160000 +0000" stop="20261124170000 +0000">'
+            b'<title>Fixture</title><desc>' + b"Programme description " * 34 +
+            b'</desc><category>Sports</category><icon src="programme.jpg" /></programme>'
+        )
+        measurements = []
+        for count in (8_000, 164_000):
+            with self.path.open("wb") as fixture:
+                fixture.write(b'<tv generator-info-name="fixture"><channel id="1"><icon src="station.png" /></channel>')
+                for _ in range(count):
+                    fixture.write(programme)
+                fixture.write(b"</tv>")
+            input_size = self.path.stat().st_size
+            result = subprocess.check_output(
+                [sys.executable, "-B", "-c", rewrite, str(self.path), str(count)],
+                text=True, timeout=60,
+            )
+            measurements.append(int(result))
+            print(
+                f"XMLTV rewrite for {count:,} programmes ({input_size:,} bytes) peaked at {int(result) / 1024:.1f} MiB",
+                file=sys.stderr,
+            )
+        self.assertLess(measurements[1] - measurements[0], 24 * 1024)
 
 
 class PluginArtworkTests(unittest.TestCase):
@@ -298,20 +416,46 @@ class PluginArtworkTests(unittest.TestCase):
 
     def test_manual_separate_lineups_share_one_cap_and_prioritize_station_logos(self):
         self.settings["station_logo_style"] = "white"
-        self.mapped.side_effect = [{"32645"}, {"20454"}]
-        with patch.object(artwork, "MAX_REQUESTS", 2):
-            result = self.instance.run("download_epg", {}, {"settings": self.settings, "logger": self.logger})
+        self.mapped.side_effect = [set(), {"20454"}]
+        self.assertFalse((self.root / ".artwork-cache.json").exists())
+        unmapped_count = artwork.MAX_REQUESTS + 12
+
+        def run_lineup(*, lineup_id, **_kwargs):
+            if lineup_id == LINEUPS[1]:
+                return self.run_lineup(lineup_id=lineup_id)
+            path = self.root / f"{lineup_id}.xml"
+            stations = [
+                grid_channel(str(i), f"Unmapped {i}", ESPN.replace("32645", str(i)), asset_id=30000 + i)
+                for i in range(unmapped_count)
+            ]
+            zap2xml.write_xmltv(stations, path)
+            return "ok", str(path), "ok", "fixture command"
+
+        self.instance._run_zap2it_script.side_effect = run_lineup
+        result = self.instance.run("download_epg", {}, {"settings": self.settings, "logger": self.logger})
         self.assertEqual(result["status"], "queued")
         self.assertEqual(self.mapped.call_args_list, [call(f"Zap2XML ({lu})") for lu in LINEUPS])
-        self.assertEqual([args[:2] for args, _ in self.probe.call_args_list], [
-            (ESPN.replace("_ll_", "_lw_"), "image/png"), (WBBM.replace("_ll_", "_lw_"), "image/png"),
+        requests = [args[:2] for args, _ in self.probe.call_args_list]
+        self.assertEqual(requests[0], (WBBM.replace("_ll_", "_lw_"), "image/png"))
+        self.assertEqual(sum(content_type == "image/png" for _, content_type in requests), 96)
+        self.assertEqual([url for url, content_type in requests if content_type == "image/jpeg"], [
+            "https://zpmc.tmsimg.com/assets/p28711_i_h9_ab.jpg",
         ])
-        self.assertEqual(icon_urls(self.sources[f"Zap2XML ({LINEUPS[0]})"], "programme"), {"32645": POSTER})
-        self.assertEqual(icon_urls(self.sources[f"Zap2XML ({LINEUPS[1]})"], "channel"), {
+        self.assertEqual(len(requests), 97)
+        unmapped_guide = self.sources[f"Zap2XML ({LINEUPS[0]})"]
+        self.assertEqual(sum("_lw_" in url for url in icon_urls(unmapped_guide, "channel").values()), 95)
+        self.assertEqual(icon_urls(unmapped_guide, "programme"), {
+            str(i): POSTER.replace("21040818", str(30000 + i)) for i in range(unmapped_count)
+        })
+        mapped_guide = self.sources[f"Zap2XML ({LINEUPS[1]})"]
+        self.assertEqual(icon_urls(mapped_guide, "channel"), {
             "20454": WBBM.replace("_ll_", "_lw_"),
         })
+        self.assertEqual(icon_urls(mapped_guide, "programme"), {
+            "20454": "https://zpmc.tmsimg.com/assets/p28711_i_h9_ab.jpg",
+        })
         self.logger.info.assert_called_once()
-        self.assertIn("selected=2 fallback=2 cache-hit=0 budget-skipped=2 requests=2", self.logger.info.call_args.args[0])
+        self.assertIn("selected=97 fallback=45 cache-hit=0 budget-skipped=45 requests=97", self.logger.info.call_args.args[0])
 
     def test_scheduled_merged_download_uses_merged_source_mapping(self):
         self.settings["merge_lineups"] = True

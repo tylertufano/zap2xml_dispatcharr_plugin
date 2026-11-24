@@ -343,7 +343,8 @@ class Plugin:
                 try:
                     self._merge_xmltv([p for _, p in produced_files], str(staging_path))
                     if staging_path != merged_path:
-                        self._apply_artwork(artwork, staging_path, epg_name, logger)
+                        mappings = self._prepare_artwork(artwork, [(epg_name, staging_path)], logger)
+                        self._apply_artwork(artwork, staging_path, epg_name, mappings.get(staging_path, ()), logger)
                         staging_path.replace(merged_path)
                 except Exception as e:
                     return {"status": "error", "message": f"Failed to merge XMLTV files: {e}", "commands": cmds}
@@ -363,16 +364,11 @@ class Plugin:
                     return {**resp, "commands": cmds}
                 responses.append(resp)
             else:
-                if artwork.station_style and artwork.programme_style and len(produced_files) > 1:
-                    for lu, src in produced_files:
-                        try:
-                            artwork.prepare_station_logos(src)
-                        except Exception:
-                            if logger:
-                                logger.exception("[zap2xml] Could not check station logos for %s", lu)
+                sources = [(f"{epg_name_base} ({lu})", src) for lu, src in produced_files]
+                mappings = self._prepare_artwork(artwork, sources, logger)
                 for lu, src in produced_files:
                     epg_name = f"{epg_name_base} ({lu})"
-                    self._apply_artwork(artwork, src, epg_name, logger)
+                    self._apply_artwork(artwork, src, epg_name, mappings.get(src, ()), logger)
                     meta = self._derive_meta(lu)
                     safe_lu = self._sanitize(lu)
                     out_name = f"zap2xml_{meta['country']}_{safe_lu}.xml"
@@ -666,16 +662,26 @@ class Plugin:
         ).values_list("tvg_id", flat=True)
         return {str(station_id) for station_id in station_ids if station_id}
 
-    def _apply_artwork(self, artwork, path, epg_name, logger):
-        if not artwork.enabled:
-            return
-        mapped_station_ids = set()
-        if artwork.programme_style:
+    def _prepare_artwork(self, artwork, sources, logger):
+        mappings = {}
+        if not artwork.uses_mappings:
+            return mappings
+        for epg_name, path in sources:
             try:
-                mapped_station_ids = self._mapped_station_ids(epg_name)
+                mappings[path] = self._mapped_station_ids(epg_name)
             except Exception:
                 if logger:
                     logger.warning("[zap2xml] Could not read mapped stations for %s", epg_name)
+        artwork.reserve_programme = bool(artwork.programme_style and any(mappings.values()))
+        for epg_name, path in sources:
+            try:
+                artwork.prepare_mapped_logos(path, mappings.get(path, ()))
+            except Exception:
+                if logger:
+                    logger.exception("[zap2xml] Could not check mapped station logos for %s", epg_name)
+        return mappings
+
+    def _apply_artwork(self, artwork, path, epg_name, mapped_station_ids, logger):
         try:
             artwork.apply(path, mapped_station_ids)
         except Exception:
