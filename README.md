@@ -45,7 +45,11 @@ Dispatcharr worker processes. Install updates from the plugin repository:
 
 - **Station Logo Style** offers Provider Default, Dark, White, Gray, and Light. This sets the station icon in the XMLTV guide. Dispatcharr's EPG logo controls handle assigning those icons to channels.
 - **Include Programme Artwork** is on by default. Turn it off to omit programme icons.
-- **Programme Artwork Style** offers Provider Default, Landscape Iconic (art without title text), and Landscape Banner with Title. Alternative artwork is checked only for stations already mapped to the matching Zap2XML EPG source, including the merged source. New sources use supplied artwork until stations are mapped and the guide refreshes again.
+- **Programme Artwork Style** offers Provider Default, Landscape Iconic, Landscape Banner with Title,
+  Portrait Banner with Title (2:3 / 3:4), Portrait Iconic (2:3 / 3:4), and Square Iconic (1:1). Iconic art
+  has no title text. Portrait candidates check 2:3 sizes first, then 3:4. Alternative artwork is checked only
+  for stations already mapped to the matching Zap2XML EPG source, including the merged source. New sources
+  use supplied artwork until stations are mapped and the guide refreshes again.
 
 Saved settings take effect on the next manual or scheduled Zap2XML download. Provider Default uses the supplied icon URLs as-is. An alternative is used only after its image type and signature are verified. Missing, unavailable, or unrecognized variants fall back to the supplied icon.
 
