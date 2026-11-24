@@ -17,7 +17,13 @@ from urllib.parse import urlsplit
 
 
 STATION_STYLES = {"dark": "ld", "white": "lw", "gray": "lg", "light": "ll"}
-PROGRAMME_STYLES = {"landscape_iconic": "i_h9", "landscape_banner": "b_h8"}
+PROGRAMME_STYLES = {
+    "landscape_iconic": ("i_h9",),
+    "landscape_banner": ("b_h8",),
+    "portrait_banner": ("b_v8", "b_v12", "b_v9", "b_v13"),
+    "portrait_iconic": ("i_v8", "i_v12", "i_v9", "i_v13"),
+    "square_iconic": ("i_s4",),
+}
 CDN_HOST = "zpmc.tmsimg.com"
 HOSTS = (CDN_HOST, "dshm.tmsimg.com", "zap2it.tmsimg.com")
 PROVIDER_URL = re.compile(r"https?://(?P<host>[a-z0-9.]+)(?P<path>/[a-zA-Z0-9_./-]+)")
@@ -26,7 +32,7 @@ STATION_PATH = re.compile(
     r"(?P<asset>s[0-9]{1,16})_l[dwgl]_(?P<size>[hv][0-9]{1,3})_(?P<suffix>[a-z]{2})\.png"
 )
 PROGRAMME_PATH = re.compile(
-    r"/assets/(?:assets/)?(?P<asset>p[0-9]{1,16})_[a-z]{1,3}_[hv][0-9]{1,3}_(?P<suffix>[a-z]{2})\.jpg"
+    r"/assets/(?:assets/)?(?P<asset>p[0-9]{1,16})_[a-z]{1,3}_[hvs][0-9]{1,3}_(?P<suffix>[a-z]{2})\.jpg"
 )
 IMAGE_SIGNATURES = {"image/png": b"\x89PNG\r\n\x1a\n", "image/jpeg": b"\xff\xd8\xff"}
 MAX_REQUESTS = 128
@@ -47,17 +53,18 @@ def candidates(original, style, *, station):
         asset = STATION_PATH.fullmatch(url["path"])
         if not asset:
             return ()
-        stem = f"https://{url['host']}{asset['prefix']}{asset['asset']}_{style}_{asset['size']}"
+        stems = (f"https://{url['host']}{asset['prefix']}{asset['asset']}_{style}_{asset['size']}",)
         extension = "png"
     else:
         asset = PROGRAMME_PATH.fullmatch(url["path"])
         if not asset:
             return ()
-        stem = f"https://{CDN_HOST}/assets/{asset['asset']}_{style}"
+        variants = (style,) if isinstance(style, str) else style
+        stems = (f"https://{CDN_HOST}/assets/{asset['asset']}_{variant}" for variant in variants)
         extension = "jpg"
 
     suffixes = dict.fromkeys((asset["suffix"], "aa"))
-    return tuple(f"{stem}_{suffix}.{extension}" for suffix in suffixes)
+    return tuple(f"{stem}_{suffix}.{extension}" for stem in stems for suffix in suffixes)
 
 
 def _probe(url, content_type, deadline):
@@ -268,8 +275,10 @@ class ArtworkRefresh:
 
         content_type = "image/png" if station else "image/jpeg"
         cache_hit = False
+        # The first variant identifies the style and keeps existing landscape cache keys valid.
+        cache_style = style[0] if isinstance(style, tuple) else style
         for url in variants:
-            key = hashlib.sha256(f"{style}\0{original}\0{url}".encode()).hexdigest()
+            key = hashlib.sha256(f"{cache_style}\0{original}\0{url}".encode()).hexdigest()
             cached = self.cache.get(key)
             if cached and cached[0] > time.time():
                 cache_hit = True

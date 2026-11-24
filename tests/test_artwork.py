@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import os
@@ -183,6 +184,77 @@ class ArtworkTests(unittest.TestCase):
                     (expected, "image/jpeg"),
                 ])
                 self.assertEqual(refresh.selected, 2)
+
+    def test_portrait_sizes_and_suffixes_are_tried_in_order(self):
+        for style, asset, sizes, selected in (
+            ("portrait_banner", 21040818, ("b_v8", "b_v12"), "p21040818_b_v12_aa.jpg"),
+            ("portrait_iconic", 18535690, ("i_v8", "i_v12", "i_v9", "i_v13"), "p18535690_i_v13_aa.jpg"),
+        ):
+            with self.subTest(style=style):
+                self.channels[0] = grid_channel("32645", "ESPN", ESPN, asset_id=asset)
+                self.write_guide()
+                original = ET.parse(self.path).getroot()
+                expected = f"https://zpmc.tmsimg.com/assets/{selected}"
+                self.probe.reset_mock()
+                self.probe.side_effect = lambda url, *_: "valid" if url == expected else "missing"
+                self.refresh(programme_artwork_style=style).apply(self.path, {"32645"})
+                self.assertEqual([args[:2] for args, _ in self.probe.call_args_list], [
+                    (f"https://zpmc.tmsimg.com/assets/p{asset}_{size}_{suffix}.jpg", "image/jpeg")
+                    for size in sizes for suffix in ("ab", "aa")
+                ])
+                original.find('./programme[@channel="32645"]/icon').set("src", expected)
+                self.assertEqual(ET.tostring(ET.parse(self.path).getroot()), ET.tostring(original))
+
+    def test_square_style_and_square_input_keep_the_asset_id(self):
+        self.channels[0]["events"][0]["program"]["preferredImage"] = {
+            "uri": "//zap2it.tmsimg.com/assets/p18535690_i_s4_ab.jpg",
+        }
+        self.write_guide()
+        self.refresh(programme_artwork_style="square_iconic").apply(self.path, {"32645"})
+        square = "https://zpmc.tmsimg.com/assets/p18535690_i_s4_ab.jpg"
+        self.assertEqual(icon_urls(self.path, "programme")["32645"], square)
+        self.probe.assert_called_once()
+        self.assertEqual(self.probe.call_args.args[:2], (square, "image/jpeg"))
+        source = square.replace("zpmc", "dshm").replace("_ab.jpg", "_aa.jpg")
+        candidates = artwork.candidates(source, artwork.PROGRAMME_STYLES["portrait_iconic"], station=False)
+        self.assertEqual(candidates, tuple(
+            f"https://zpmc.tmsimg.com/assets/p18535690_i_{size}_aa.jpg" for size in ("v8", "v12", "v9", "v13")
+        ))
+        self.assertEqual(artwork.candidates(source + "?extra", ("i_s4",), station=False), ())
+
+    def test_portrait_misses_share_the_budget_and_persist(self):
+        original = self.path.read_bytes()
+        other = self.root / "second.xml"
+        other.write_bytes(original.replace(b"p21040818", b"p8130405"))
+        second_original = other.read_bytes()
+        self.probe.side_effect = lambda *_: "missing"
+        with patch.object(artwork, "MAX_REQUESTS", 5):
+            refresh = self.refresh(programme_artwork_style="portrait_banner")
+            refresh.apply(self.path, {"32645"})
+            refresh.apply(other, {"32645"})
+        self.assertEqual(self.probe.call_count, 5)
+        self.assertEqual(refresh.budget_skipped, 2)
+        self.assertEqual(self.path.read_bytes(), original)
+        self.assertEqual(other.read_bytes(), second_original)
+
+        self.probe.reset_mock()
+        self.refresh(programme_artwork_style="portrait_banner").apply(self.path, {"32645"})
+        self.assertEqual(self.probe.call_count, 3)
+        self.probe.reset_mock()
+        self.refresh(programme_artwork_style="portrait_banner").apply(self.path, {"32645"})
+        self.probe.assert_not_called()
+        self.assertEqual(self.path.read_bytes(), original)
+
+    def test_saved_landscape_cache_keys_are_still_used(self):
+        expires = int(artwork.time.time()) + 60
+        first = ICONIC.replace("_aa.jpg", "_ab.jpg")
+        self.cache.write_text(json.dumps({
+            hashlib.sha256(f"i_h9\0{POSTER}\0{first}".encode()).hexdigest(): [expires, False],
+            hashlib.sha256(f"i_h9\0{POSTER}\0{ICONIC}".encode()).hexdigest(): [expires, True],
+        }))
+        self.refresh(programme_artwork_style="landscape_iconic").apply(self.path, {"32645"})
+        self.assertEqual(icon_urls(self.path, "programme")["32645"], ICONIC)
+        self.probe.assert_not_called()
 
     def test_artwork_off_omits_programme_icons_and_still_selects_station_style(self):
         baseline = ET.parse(self.path)
