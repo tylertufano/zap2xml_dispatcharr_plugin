@@ -5,7 +5,7 @@ Usage: python3 scripts/build_fork_release.py VERSION
   e.g. python3 scripts/build_fork_release.py 2.1.4.1
 
 The plugin is installed under the existing ``zap2xml`` slug. The release ZIP is
-flat and contains only the six files Dispatcharr needs from ``src/zap2xml``.
+flat and contains only the files Dispatcharr needs from ``src/zap2xml``.
 """
 
 import datetime
@@ -26,6 +26,7 @@ ZIP_FILES = (
     "plugin.json",
     "plugin.py",
     "zap2xml.py",
+    "artwork.py",
     "plugins.py",
     "__init__.py",
     "channels.db",

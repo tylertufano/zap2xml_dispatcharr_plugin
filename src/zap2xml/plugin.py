@@ -31,6 +31,8 @@ from uuid import uuid4
 import xml.etree.ElementTree as ET
 from typing import List, Tuple, Optional, Dict
 
+from .artwork import ArtworkRefresh
+
 # ---- Global default UA (used if UI field empty and no env/CoreSettings UA) ----
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -140,6 +142,39 @@ class Plugin:
             "type": "string",
             "default": "Zap2XML",
             "help_text": "Base name for the EPG Source(s) added to Dispatcharr.",
+        },
+        {
+            "id": "station_logo_style",
+            "label": "Station Logo Style",
+            "type": "select",
+            "default": "provider_default",
+            "options": [
+                {"value": "provider_default", "label": "Provider Default"},
+                {"value": "dark", "label": "Dark"},
+                {"value": "white", "label": "White"},
+                {"value": "gray", "label": "Gray"},
+                {"value": "light", "label": "Light"},
+            ],
+            "help_text": "Choose a station logo style for the XMLTV guide.",
+        },
+        {
+            "id": "include_programme_artwork",
+            "label": "Include Programme Artwork",
+            "type": "boolean",
+            "default": True,
+            "help_text": "Include artwork icons on listings in the XMLTV guide.",
+        },
+        {
+            "id": "programme_artwork_style",
+            "label": "Programme Artwork Style",
+            "type": "select",
+            "default": "provider_default",
+            "options": [
+                {"value": "provider_default", "label": "Provider Default"},
+                {"value": "landscape_iconic", "label": "Landscape Iconic"},
+                {"value": "landscape_banner", "label": "Landscape Banner with Title"},
+            ],
+            "help_text": "Choose an artwork style for listings on stations mapped to this guide.",
         },
         {
             "id": "confirm",
@@ -295,17 +330,32 @@ class Plugin:
                     return {"status": "error", "message": f"zap2xml failed for lineup '{lu}': {msg}", "commands": cmds}
                 produced_files.append((lu, produced_path))
 
+            # Both entry points hold the download lock here. A single resolver
+            # limits discovery across the lineup outputs and owns the shared cache.
+            artwork = ArtworkRefresh(settings, PLUGIN_DIR / ".artwork-cache.json")
             responses = []
             if merge_lineups and len(produced_files) > 1:
                 merged_name = "zap2xml_merged.xml"
-                merged_path = os.path.join(out_dir, merged_name)
+                merged_path = Path(out_dir) / merged_name
+                epg_name = f"{epg_name_base} (merged)"
+                # Leave the last published guide in place during artwork discovery.
+                staging_path = merged_path.with_name(f".{merged_name}.tmp") if artwork.enabled else merged_path
                 try:
-                    self._merge_xmltv([p for _, p in produced_files], merged_path)
+                    self._merge_xmltv([p for _, p in produced_files], str(staging_path))
+                    if staging_path != merged_path:
+                        self._apply_artwork(artwork, staging_path, epg_name, logger)
+                        staging_path.replace(merged_path)
                 except Exception as e:
                     return {"status": "error", "message": f"Failed to merge XMLTV files: {e}", "commands": cmds}
+                finally:
+                    if staging_path != merged_path:
+                        try:
+                            staging_path.unlink(missing_ok=True)
+                        except OSError:
+                            pass
                 resp = self._create_or_update_epg_source(
-                    epg_name=f"{epg_name_base} (merged)",
-                    xml_path=merged_path,
+                    epg_name=epg_name,
+                    xml_path=str(merged_path),
                     refresh_hours=refresh_hours,
                     logger=logger,
                 )
@@ -313,7 +363,16 @@ class Plugin:
                     return {**resp, "commands": cmds}
                 responses.append(resp)
             else:
+                if artwork.station_style and artwork.programme_style and len(produced_files) > 1:
+                    for lu, src in produced_files:
+                        try:
+                            artwork.prepare_station_logos(src)
+                        except Exception:
+                            if logger:
+                                logger.exception("[zap2xml] Could not check station logos for %s", lu)
                 for lu, src in produced_files:
+                    epg_name = f"{epg_name_base} ({lu})"
+                    self._apply_artwork(artwork, src, epg_name, logger)
                     meta = self._derive_meta(lu)
                     safe_lu = self._sanitize(lu)
                     out_name = f"zap2xml_{meta['country']}_{safe_lu}.xml"
@@ -323,7 +382,7 @@ class Plugin:
                     except Exception as e:
                         return {"status": "error", "message": f"Unable to write EPG file: {e}", "commands": cmds}
                     resp = self._create_or_update_epg_source(
-                        epg_name=f"{epg_name_base} ({lu})",
+                        epg_name=epg_name,
                         xml_path=out_path,
                         refresh_hours=refresh_hours,
                         logger=logger,
@@ -331,6 +390,13 @@ class Plugin:
                     if resp.get("status") != "ok":
                         return {**resp, "commands": cmds}
                     responses.append(resp)
+
+            if artwork.enabled:
+                message = f"[zap2xml] {artwork.summary()}"
+                if logger:
+                    logger.info(message)
+                else:
+                    print(message, file=sys.stderr, flush=True)
 
             try:
                 self._cleanup_plugin_workspace(logger)
@@ -585,6 +651,37 @@ class Plugin:
             except Exception:
                 pass
             tree.write(out_path, encoding="utf-8", xml_declaration=True)
+
+    @staticmethod
+    def _mapped_station_ids(epg_name):
+        from apps.channels.managers import epg_ids_mapped_to_channels
+        from apps.epg.models import EPGData, EPGSource
+
+        source = EPGSource.objects.filter(name=epg_name, source_type="xmltv").first()
+        if source is None:
+            return set()
+        mapped_ids = epg_ids_mapped_to_channels(epg_source=source)
+        station_ids = EPGData.objects.filter(
+            epg_source=source, pk__in=mapped_ids,
+        ).values_list("tvg_id", flat=True)
+        return {str(station_id) for station_id in station_ids if station_id}
+
+    def _apply_artwork(self, artwork, path, epg_name, logger):
+        if not artwork.enabled:
+            return
+        mapped_station_ids = set()
+        if artwork.programme_style:
+            try:
+                mapped_station_ids = self._mapped_station_ids(epg_name)
+            except Exception:
+                if logger:
+                    logger.warning("[zap2xml] Could not read mapped stations for %s", epg_name)
+        try:
+            artwork.apply(path, mapped_station_ids)
+        except Exception:
+            if logger:
+                logger.exception("[zap2xml] Could not apply artwork preferences for %s", epg_name)
+
     def _create_or_update_epg_source(self, epg_name: str, xml_path: str, refresh_hours: int, logger=None):
         """Create/update EPGSource and queue parse."""
         try:
