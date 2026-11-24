@@ -1,0 +1,65 @@
+{
+  "generated_at": "2026-11-24T21:24:59Z",
+  "manifest": {
+    "slug": "zap2xml",
+    "name": "Zap2XML",
+    "description": "Create an XMLTV EPG from Zap2it (single or multiple lineups).",
+    "author": "jesmannstl (fork: tylertufano)",
+    "registry_url": "https://github.com/tylertufano/zap2xml_dispatcharr_plugin",
+    "registry_name": "tylertufano/zap2xml_dispatcharr_plugin",
+    "last_updated": "2026-11-24T21:24:59Z",
+    "latest": {
+      "version": "2.1.4.4",
+      "url": "https://github.com/tylertufano/zap2xml_dispatcharr_plugin/releases/download/v2.1.4.4/zap2xml-v2.1.4.4.zip",
+      "checksum_md5": "ced88b0838573605c3a3e651c14177df",
+      "checksum_sha256": "dc890244bf40566f45d7779c81871862be1e69fe7c6ebecb9f0ad8f15552be63",
+      "size": 2329225,
+      "last_updated": "2026-11-24T21:24:59Z",
+      "build_timestamp": "2026-11-24T21:24:59Z",
+      "min_dispatcharr_version": "0.34.0",
+      "latest_url": "https://github.com/tylertufano/zap2xml_dispatcharr_plugin/releases/download/v2.1.4.4/zap2xml-v2.1.4.4.zip"
+    },
+    "versions": [
+      {
+        "version": "2.1.4.4",
+        "url": "https://github.com/tylertufano/zap2xml_dispatcharr_plugin/releases/download/v2.1.4.4/zap2xml-v2.1.4.4.zip",
+        "checksum_md5": "ced88b0838573605c3a3e651c14177df",
+        "checksum_sha256": "dc890244bf40566f45d7779c81871862be1e69fe7c6ebecb9f0ad8f15552be63",
+        "size": 2329225,
+        "last_updated": "2026-11-24T21:24:59Z",
+        "build_timestamp": "2026-11-24T21:24:59Z",
+        "min_dispatcharr_version": "0.34.0"
+      },
+      {
+        "version": "2.1.4.3",
+        "url": "https://github.com/tylertufano/zap2xml_dispatcharr_plugin/releases/download/v2.1.4.3/zap2xml-v2.1.4.3.zip",
+        "checksum_md5": "3798b8f95cdb4ca3fb5f46c9e3f2aad3",
+        "checksum_sha256": "dee25df14ff4f21564a2fa1f9cfdc0b6d1402ebb2b17f2e7032d64d2913a93f1",
+        "size": 2328966,
+        "last_updated": "2026-11-24T17:54:53Z",
+        "build_timestamp": "2026-11-24T17:54:53Z",
+        "min_dispatcharr_version": "0.34.0"
+      },
+      {
+        "version": "2.1.4.2",
+        "url": "https://github.com/tylertufano/zap2xml_dispatcharr_plugin/releases/download/v2.1.4.2/zap2xml-v2.1.4.2.zip",
+        "checksum_md5": "6a9206c47834b6c88086bdee936f93f3",
+        "checksum_sha256": "dd4345fea2bef4bd1867d4bddc6e8a2e252537490e08d39fd1e7cf96213bf56f",
+        "size": 2323037,
+        "last_updated": "2026-11-24T04:14:12Z",
+        "build_timestamp": "2026-11-24T04:14:12Z",
+        "min_dispatcharr_version": "0.34.0"
+      },
+      {
+        "version": "2.1.4.1",
+        "url": "https://github.com/tylertufano/zap2xml_dispatcharr_plugin/releases/download/v2.1.4.1/zap2xml-v2.1.4.1.zip",
+        "checksum_md5": "463b7803eab21aa8db93b700ac27c653",
+        "checksum_sha256": "fa36404239014de715d58737ab74c20d233e3719a7a2b3066664ee57e8c62a9d",
+        "size": 2322966,
+        "last_updated": "2026-11-23T19:59:00Z",
+        "build_timestamp": "2026-11-23T19:59:00Z",
+        "min_dispatcharr_version": "0.34.0"
+      }
+    ]
+  }
+}
