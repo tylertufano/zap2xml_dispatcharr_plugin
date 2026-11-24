@@ -16,6 +16,8 @@ v1.9.14:
 - Streams verbose, unmasked child logs: -v 2 + ZAP2XML_MASK_POSTAL=0 → container logs.
 """
 
+import fcntl
+import json
 import os
 import sys
 import subprocess
@@ -24,6 +26,8 @@ import threading
 import time
 import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from uuid import uuid4
 import xml.etree.ElementTree as ET
 from typing import List, Tuple, Optional, Dict
 
@@ -35,9 +39,48 @@ DEFAULT_UA = (
 )
 
 
+LOCK_BUSY_EXIT = 75  # Must match the bundled zap2xml.py.
+RETRY_DELAY = timedelta(minutes=30)
+PLUGIN_DIR = Path(__file__).resolve().parent
+
+
+def _timestamp(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.removesuffix("Z"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _download_due(settings, state, now):
+    if not settings.get("auto_download_enabled", True):
+        return False
+    try:
+        interval = int(settings.get("refresh_interval_hours", 24))
+    except (TypeError, ValueError):
+        interval = 24
+    if interval <= 0:
+        return False
+
+    # Carry forward the last successful download from the previous version.
+    generated = _timestamp(state.get("last_generated")) or _timestamp(settings.get("last_generated"))
+    if generated is not None and now < generated + timedelta(hours=interval):
+        return False
+    attempted = _timestamp(state.get("last_attempt"))
+    return attempted is None or now >= attempted + RETRY_DELAY
+
+
+def _save_download_state(path, state):
+    temp = path.with_suffix(".tmp")
+    temp.write_text(json.dumps(state) + "\n", encoding="utf-8")
+    temp.replace(path)
+
+
 class Plugin:
     name = "Zap2XML"
-    version = "2.1.4.1"
+    version = "2.1.4.2"
     description = "Create an XMLTV EPG from Zap2it (single or multiple lineups)."
 
     # Settings rendered by UI
@@ -138,30 +181,39 @@ class Plugin:
             pass
 
     def run(self, action: str, params: dict, context: dict):
-        # tylertufano fork: one download at a time across ALL Dispatcharr worker processes. Each worker starts its
-        # own scheduler thread, and every tick that lost the zap2xml.py lock used to run _cleanup_plugin_workspace,
-        # deleting the running download's xmltv_*.xml files. A tick or click that can't take this lock now returns
-        # without touching the workspace.
         if action == "download_epg":
-            import fcntl
-            lock_fd = open(os.path.join(os.path.dirname(__file__), ".download.lock"), "w")
-            try:
-                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                lock_fd.close()
-                logger = (context or {}).get("logger")
-                if logger:
-                    try: logger.info("[zap2xml] a download is already running; skipped (workspace untouched)")
-                    except Exception: pass
-                return {"status": "ok", "message": "A download is already running; skipped."}
-            try:
-                return self._run_action(action, params, context)
-            finally:
-                try:
-                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
-                finally:
-                    lock_fd.close()
+            return self._download(params, context)
         return self._run_action(action, params, context)
+
+    def _download(self, params, context, *, scheduled=False):
+        # Check the schedule and save the attempt under the same cross-worker
+        # lock that protects the download and its workspace.
+        with (PLUGIN_DIR / ".download.lock").open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                if scheduled:
+                    return None
+                return {"status": "skipped", "message": "A download is already running; skipped."}
+
+            state_path = PLUGIN_DIR / ".download-state.json"
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                state = {}
+            now = datetime.now(timezone.utc)
+            if scheduled and not _download_due(context["settings"], state, now):
+                return None
+
+            state["last_attempt"] = now.isoformat()
+            _save_download_state(state_path, state)
+            if scheduled:
+                context["logger"].info("[zap2xml] Auto-download due; running download_epg")
+            result = self._run_action("download_epg", params, context)
+            if result.get("status") == "queued":
+                state["last_generated"] = datetime.now(timezone.utc).isoformat()
+                _save_download_state(state_path, state)
+            return result
 
     def _run_action(self, action: str, params: dict, context: dict):
         if action not in ("download_epg", "apply_channel_mappings"):
@@ -230,12 +282,14 @@ class Plugin:
                 if info["is_ota"] and not info["postal"]:
                     return {"status": "error", "message": f"OTA lineup '{lu}' is missing embedded postal/ZIP (e.g., USA-OTA12345 or CAN-OTAK1P5W1)."}
 
-                ok, produced_path, msg, cmd = self._run_zap2it_script(
+                status, produced_path, msg, cmd = self._run_zap2it_script(
                     country=info["country"], postal=info["postal"], lineup_id=lu,
                     timespan=timespan, delay=delay, logger=logger, user_agent=user_agent
                 )
                 cmds.append(cmd)
-                if not ok or not produced_path or not os.path.exists(produced_path):
+                if status == "skipped":
+                    return {"status": status, "message": msg, "commands": cmds}
+                if status != "ok" or not produced_path or not os.path.exists(produced_path):
                     try: self._cleanup_plugin_workspace(logger)
                     except Exception: pass
                     return {"status": "error", "message": f"zap2xml failed for lineup '{lu}': {msg}", "commands": cmds}
@@ -373,21 +427,17 @@ class Plugin:
     ):
         """
         Run zap2xml.py with verbose, unmasked logging; stream output to container logs.
-        Returns (ok, produced_path, message, cmd_str).
+        Returns (status, produced_path, message, cmd_str).
         """
         import subprocess, sys, os
         try:
             plugin_dir = os.path.dirname(__file__)
             script_path = os.path.join(plugin_dir, "zap2xml.py")
             if not os.path.exists(script_path):
-                return False, None, "zap2xml.py not found in plugin directory", ""
+                return "error", None, "zap2xml.py not found in plugin directory", ""
 
-            produced_path = os.path.join(plugin_dir, f"xmltv_{self._sanitize(lineup_id)}.xml")
-            try:
-                if os.path.exists(produced_path):
-                    os.remove(produced_path)
-            except Exception:
-                pass
+            # A contender must not remove an active child's output before it gets the CLI lock.
+            produced_path = os.path.join(plugin_dir, f"xmltv_{self._sanitize(lineup_id)}_{uuid4().hex}.xml")
 
             python_bin = self._resolve_python()
             cmd = [
@@ -443,11 +493,13 @@ class Plugin:
             finally:
                 ret = proc.wait()
 
+            if ret == LOCK_BUSY_EXIT:
+                return "skipped", None, "A download is already running; skipped.", cmd_str
             if ret != 0:
-                return False, None, f"zap2xml.py exited with code {ret}", cmd_str
+                return "error", None, f"zap2xml.py exited with code {ret}", cmd_str
 
             if not os.path.exists(produced_path):
-                return False, None, "zap2xml.py finished but no XML produced", cmd_str
+                return "error", None, "zap2xml.py finished but no XML produced", cmd_str
 
             if logger:
                 try:
@@ -455,10 +507,10 @@ class Plugin:
                 except Exception:
                     pass
 
-            return True, produced_path, "ok", cmd_str
+            return "ok", produced_path, "ok", cmd_str
 
         except Exception as e:
-            return False, None, f"zap2xml execution error: {e}", " ".join(cmd) if "cmd" in locals() else ""
+            return "error", None, f"zap2xml execution error: {e}", " ".join(cmd) if "cmd" in locals() else ""
 
     
     def _merge_xmltv(self, paths: List[str], out_path: str):
@@ -572,19 +624,6 @@ class Plugin:
                         "name": source.name,
                     },
                 )
-            except Exception:
-                pass
-
-            # record last_generated so scheduler can trigger correctly
-            try:
-                from apps.plugins.models import PluginConfig
-                plugin_key = __name__.split(".")[0]
-                cfg = PluginConfig.objects.filter(key=plugin_key).first()
-                if cfg:
-                    st = dict(cfg.settings or {})
-                    st["last_generated"] = datetime.utcnow().isoformat() + "Z"
-                    cfg.settings = st
-                    cfg.save(update_fields=["settings", "updated_at"])
             except Exception:
                 pass
 
@@ -889,7 +928,7 @@ class Plugin:
             pass
 
 
-# Lightweight background scheduler (unchanged)
+# Lightweight background scheduler
 _SCHEDULER_THREAD = None
 _SCHEDULER_LOCK = threading.Lock()
 
@@ -902,54 +941,30 @@ def _ensure_scheduler_started():
         t.start()
         _SCHEDULER_THREAD = t
 
+def _scheduler_tick(logger):
+    from apps.plugins.models import PluginConfig
+
+    cfg = PluginConfig.objects.filter(key=_plugin_key()).first()
+    if not cfg or not cfg.enabled:
+        return
+    result = Plugin()._download({}, {"settings": cfg.settings or {}, "logger": logger}, scheduled=True)
+    if result and result.get("status") == "error":
+        logger.warning("[zap2xml] Auto-download failed: %s", result["message"])
+    elif result and result.get("status") == "skipped":
+        logger.info("[zap2xml] Auto-download skipped: %s", result["message"])
+
+
 def _scheduler_loop():
     import logging
+
     logger = logging.getLogger(__name__)
     while True:
         try:
-            from apps.plugins.models import PluginConfig
-            cfg = PluginConfig.objects.filter(key=_plugin_key()).first()
-            if not cfg or not cfg.enabled:
-                time.sleep(60); continue
-            st = cfg.settings or {}
-            auto_enabled = bool(st.get("auto_download_enabled", True))
-            interval_h = st.get("refresh_interval_hours", 24) or 24
-            try: interval_h = int(interval_h)
-            except Exception: interval_h = 24
-            if not auto_enabled or interval_h <= 0:
-                time.sleep(60); continue
-            last_iso = st.get("last_generated")
-            should_run = False
-            if not last_iso:
-                should_run = True
-            else:
-                try:
-                    iso = last_iso
-                    if iso.endswith("Z"):
-                        last_dt = datetime.fromisoformat(iso[:-1]).replace(tzinfo=timezone.utc)
-                    else:
-                        last_dt = datetime.fromisoformat(iso)
-                        if last_dt.tzinfo is None:
-                            last_dt = last_dt.replace(tzinfo=timezone.utc)
-                    if datetime.now(timezone.utc) - last_dt >= timedelta(hours=interval_h):
-                        should_run = True
-                except Exception:
-                    should_run = True
-            if should_run:
-                logger.info("[zap2xml] Auto-download tick… running download_epg")
-                try:
-                    p = Plugin()
-                    context = {"settings": st, "logger": logger}
-                    p.run("download_epg", {}, context)
-                except Exception as e:
-                    logger.warning(f"[zap2xml] Auto-download failed: {e}")
-            time.sleep(60)
+            _scheduler_tick(logger)
         except Exception:
-            try:
-                logger.exception("[zap2xml] Scheduler loop error")
-            except Exception:
-                pass
-            time.sleep(60)
+            logger.exception("[zap2xml] Scheduler loop error")
+        time.sleep(60)
+
 
 def _plugin_key():
     return 'zap2xml'
