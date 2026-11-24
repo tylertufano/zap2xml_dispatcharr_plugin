@@ -33,7 +33,7 @@ import time
 from pathlib import Path
 # === v2.1.0 additions ===
 # Simple display-name rewrite based on callSign -> station_name mapping (DB lookup by callSign only).
-import sqlite3, atexit, signal, contextlib, fcntl
+import sqlite3, contextlib, fcntl
 
 def _load_callsign_to_stationname():
     lut = {}
@@ -118,59 +118,28 @@ def _rewrite_first_display_name_with_station_name(root):
         except Exception:
             pass
 
-# Robust single-instance guard (directory lock + file lock fallback)
- # (directory lock + file lock fallback)
-_LOCK_DIR = "/data/plugins/zap2xml.lock.d"
-_LOCK_FILE = "/data/plugins/zap2xml.run.lock"
+# Keep this exit code in sync with plugin.py.
+LOCK_BUSY_EXIT = 75
 
-def _release_locks_v210():
-    try:
-        if os.path.isdir(_LOCK_DIR):
-            os.rmdir(_LOCK_DIR)
-    except Exception:
-        pass
-    try:
-        if os.path.exists(_LOCK_FILE):
-            os.remove(_LOCK_FILE)
-    except Exception:
-        pass
 
 @contextlib.contextmanager
-def _single_instance_guard_v210():
-    # Preferred: atomic dir lock
-    try:
-        os.makedirs('/data/plugins', exist_ok=True)
-        os.mkdir(_LOCK_DIR)
-        atexit.register(_release_locks_v210)
-        signal.signal(signal.SIGTERM, lambda *a, **k: (_release_locks_v210(), os._exit(0)))
-        signal.signal(signal.SIGINT,  lambda *a, **k: (_release_locks_v210(), os._exit(0)))
-        yield
-        _release_locks_v210()
-        return
-    except FileExistsError:
-        print('[zap2xml] v2.1.0: another instance detected (dir lock); exiting.', flush=True)
-        raise SystemExit(0)
-    except Exception:
-        pass
-    # Fallback: file lock
-    try:
-        fd = os.open(_LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o644)
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        os.write(fd, str(os.getpid()).encode('utf-8'))
+def _single_instance_guard():
+    lock_dir = Path(os.environ.get("DISPATCHARR_DATA_DIR", "/data")) / "plugins"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    # Keep the lock file in place so every process locks the same inode.
+    with (lock_dir / "zap2xml.run.lock").open("a") as lock:
         try:
-            yield
-        finally:
-            try:
-                os.ftruncate(fd, 0); os.close(fd)
-            except Exception:
-                pass
-            try:
-                os.remove(_LOCK_FILE)
-            except Exception:
-                pass
-    except BlockingIOError:
-        print('[zap2xml] v2.1.0: another instance detected (file lock); exiting.', flush=True)
-        raise SystemExit(0)
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("[zap2xml] another instance is running; download skipped.", file=sys.stderr, flush=True)
+            raise SystemExit(LOCK_BUSY_EXIT) from None
+        # Older builds left an empty directory behind after SIGKILL or power loss.
+        try:
+            (lock_dir / "zap2xml.lock.d").rmdir()
+        except FileNotFoundError:
+            pass
+        yield
+
 
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -815,5 +784,5 @@ def main(argv=None):
     _v(1, f"Wrote XMLTV → {out_path}")
 
 if __name__ == "__main__":
-    with _single_instance_guard_v210():
+    with _single_instance_guard():
         main()

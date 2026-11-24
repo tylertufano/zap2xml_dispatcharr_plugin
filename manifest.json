@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-23T19:59:00Z",
+  "generated_at": "2026-11-24T04:14:12Z",
   "manifest": {
     "registry_url": "https://github.com/tylertufano/zap2xml_dispatcharr_plugin",
     "registry_name": "tylertufano/zap2xml_dispatcharr_plugin (fork)",
@@ -11,12 +11,12 @@
         "description": "Create an XMLTV EPG from Zap2it (single or multiple lineups).",
         "manifest_url": "zips/zap2xml/manifest.json",
         "author": "jesmannstl (fork: tylertufano)",
-        "last_updated": "2026-11-23T19:59:00Z",
-        "latest_version": "2.1.4.1",
-        "latest_md5": "463b7803eab21aa8db93b700ac27c653",
-        "latest_sha256": "fa36404239014de715d58737ab74c20d233e3719a7a2b3066664ee57e8c62a9d",
-        "latest_url": "https://github.com/tylertufano/zap2xml_dispatcharr_plugin/releases/download/v2.1.4.1/zap2xml-v2.1.4.1.zip",
-        "latest_size": 2322966,
+        "last_updated": "2026-11-24T04:14:12Z",
+        "latest_version": "2.1.4.2",
+        "latest_md5": "6a9206c47834b6c88086bdee936f93f3",
+        "latest_sha256": "dd4345fea2bef4bd1867d4bddc6e8a2e252537490e08d39fd1e7cf96213bf56f",
+        "latest_url": "https://github.com/tylertufano/zap2xml_dispatcharr_plugin/releases/download/v2.1.4.2/zap2xml-v2.1.4.2.zip",
+        "latest_size": 2323037,
         "help_url": "https://github.com/tylertufano/zap2xml_dispatcharr_plugin/blob/tufanito/README.md",
         "min_dispatcharr_version": "0.34.0"
       }
