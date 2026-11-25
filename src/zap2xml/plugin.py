@@ -82,7 +82,7 @@ def _save_download_state(path, state):
 
 class Plugin:
     name = "Zap2XML"
-    version = "2.1.4.4"
+    version = "2.1.4.5"
     description = "Create an XMLTV EPG from Zap2it (single or multiple lineups)."
 
     # Settings rendered by UI
