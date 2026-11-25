@@ -25,7 +25,8 @@ PROGRAMME_STYLES = {
     "square_iconic": ("i_s4",),
 }
 CDN_HOST = "zpmc.tmsimg.com"
-HOSTS = (CDN_HOST, "dshm.tmsimg.com", "zap2it.tmsimg.com")
+LEGACY_ASSET_HOSTS = ("dshm.tmsimg.com", "zap2it.tmsimg.com")
+HOSTS = (CDN_HOST, *LEGACY_ASSET_HOSTS)
 PROVIDER_URL = re.compile(r"https?://(?P<host>[a-z0-9.]+)(?P<path>/[a-zA-Z0-9_./-]+)")
 STATION_PATH = re.compile(
     r"(?P<prefix>/(?:[A-Za-z0-9_-]{1,64}/){0,6})"
@@ -277,10 +278,31 @@ class ArtworkRefresh:
         cache_hit = False
         # The first variant identifies the style and keeps existing landscape cache keys valid.
         cache_style = style[0] if isinstance(style, tuple) else style
+        previous_urls = ()
+        cdn_origin = f"https://{CDN_HOST}"
+        if not station and original.startswith(f"{cdn_origin}/assets/"):
+            # Before the base URL correction, programme icons used a legacy host.
+            # Reuse those cache entries and migrate them to the current origin.
+            path = original.removeprefix(cdn_origin)
+            previous_urls = tuple(
+                f"{scheme}://{host}{path}"
+                for host in LEGACY_ASSET_HOSTS
+                for scheme in ("https", "http")
+            )
         for url in variants:
+            now = time.time()
             key = hashlib.sha256(f"{cache_style}\0{original}\0{url}".encode()).hexdigest()
             cached = self.cache.get(key)
-            if cached and cached[0] > time.time():
+            if not (cached and cached[0] > now):
+                for previous_url in previous_urls:
+                    previous_key = hashlib.sha256(f"{cache_style}\0{previous_url}\0{url}".encode()).hexdigest()
+                    previous = self.cache.get(previous_key)
+                    if previous and previous[0] > now:
+                        cached = previous
+                        self.cache[key] = list(previous)
+                        self.cache_dirty = True
+                        break
+            if cached and cached[0] > now:
                 cache_hit = True
                 if cached[1]:
                     return url, cache_hit, False
