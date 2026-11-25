@@ -31,6 +31,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 # === v2.1.0 additions ===
 # Simple display-name rewrite based on callSign -> station_name mapping (DB lookup by callSign only).
 import sqlite3, contextlib, fcntl
@@ -453,6 +454,29 @@ def _ensure_asset_url(s: str) -> str:
         s0 += ".jpg"
     return s0
 
+GRACENOTE_CDN_HOST = "zpmc.tmsimg.com"
+GRACENOTE_LEGACY_ASSET_HOSTS = ("dshm.tmsimg.com", "zap2it.tmsimg.com")
+_GRACENOTE_ASSET_PATH = re.compile(r"/assets/[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*")
+
+def _public_programme_asset_url(url: str) -> str:
+    """Point a supported legacy Gracenote asset at the public HTTPS CDN.
+
+    Only the two legacy hosts and one flat /assets/<filename> path are
+    rewritten. Other origins, station paths and already-correct URLs pass
+    through unchanged. The CLI keeps its own constants so it does not import
+    the plugin's artwork module.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    if (parts.scheme in ("http", "https")
+        and parts.netloc.lower() in GRACENOTE_LEGACY_ASSET_HOSTS
+        and _GRACENOTE_ASSET_PATH.fullmatch(parts.path)
+    ):
+        return parts._replace(scheme="https", netloc=GRACENOTE_CDN_HOST).geturl()
+    return url
+
 def _program_icon(program: Dict[str, Any], ev: Dict[str, Any]) -> Optional[str]:
     icon = None
     pref = program.get("preferredImage") or {}
@@ -464,10 +488,7 @@ def _program_icon(program: Dict[str, Any], ev: Dict[str, Any]) -> Optional[str]:
     if not icon:
         return None
 
-    # Replace zap2it with dshm in the URL string
-    icon_str = str(icon).replace("zap2it.tmsimg.com", "dshm.tmsimg.com")
-
-    return _ensure_asset_url(icon_str)
+    return _public_programme_asset_url(_ensure_asset_url(str(icon)))
 
 # ---------- XML writer ----------
 
