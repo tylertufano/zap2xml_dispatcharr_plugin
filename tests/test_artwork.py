@@ -19,7 +19,8 @@ from src.zap2xml import artwork, plugin, zap2xml
 
 ESPN = "https://zpmc.tmsimg.com/h3/NowShowing/32645/s32645_ll_h15_ab.png"
 WBBM = "https://zpmc.tmsimg.com/h3/NowShowing/20454/s28711_ll_h15_ab.png"
-POSTER = "https://dshm.tmsimg.com/assets/p21040818_p_v9_ab.jpg"
+POSTER = "https://zpmc.tmsimg.com/assets/p21040818_p_v9_ab.jpg"
+LEGACY_POSTER = "https://dshm.tmsimg.com/assets/p21040818_p_v9_ab.jpg"
 ICONIC = "https://zpmc.tmsimg.com/assets/p21040818_i_h9_aa.jpg"
 BANNER = "https://zpmc.tmsimg.com/assets/p21040818_b_h8_aa.jpg"
 LINEUPS = ("USA-IL54437-X", "USA-OTA53963")
@@ -249,12 +250,16 @@ class ArtworkTests(unittest.TestCase):
         expires = int(artwork.time.time()) + 60
         first = ICONIC.replace("_aa.jpg", "_ab.jpg")
         self.cache.write_text(json.dumps({
-            hashlib.sha256(f"i_h9\0{POSTER}\0{first}".encode()).hexdigest(): [expires, False],
-            hashlib.sha256(f"i_h9\0{POSTER}\0{ICONIC}".encode()).hexdigest(): [expires, True],
+            hashlib.sha256(f"i_h9\0{LEGACY_POSTER}\0{first}".encode()).hexdigest(): [expires, False],
+            hashlib.sha256(f"i_h9\0{LEGACY_POSTER}\0{ICONIC}".encode()).hexdigest(): [expires, True],
         }))
         self.refresh(programme_artwork_style="landscape_iconic").apply(self.path, {"32645"})
         self.assertEqual(icon_urls(self.path, "programme")["32645"], ICONIC)
         self.probe.assert_not_called()
+        stored = json.loads(self.cache.read_text())
+        self.assertIn(
+            hashlib.sha256(f"i_h9\0{POSTER}\0{ICONIC}".encode()).hexdigest(), stored,
+        )
 
     def test_artwork_off_omits_programme_icons_and_still_selects_station_style(self):
         baseline = ET.parse(self.path)
@@ -449,6 +454,62 @@ class ArtworkTests(unittest.TestCase):
                 file=sys.stderr,
             )
         self.assertLess(measurements[1] - measurements[0], 24 * 1024)
+
+    def test_guide_rewrites_only_eligible_programme_icons(self):
+        self.channels[0]["thumbnail"] = "https://dshm.tmsimg.com/h3/NowShowing/1/s1_ll_h15_ab.png"
+        self.channels[0]["events"][0]["program"]["preferredImage"]["uri"] = (
+            "https://dshm.tmsimg.com/assets/p21040818_p_v9_ab.jpg"
+        )
+        self.channels[1]["events"][0]["program"]["preferredImage"]["uri"] = (
+            "https://example.com/assets/p1_b_v9_ab.jpg"
+        )
+        self.write_guide()
+        self.assertEqual(icon_urls(self.path, "programme"), {
+            "32645": "https://zpmc.tmsimg.com/assets/p21040818_p_v9_ab.jpg",
+            "20454": "https://example.com/assets/p1_b_v9_ab.jpg",
+        })
+        self.assertEqual(
+            icon_urls(self.path, "channel")["32645"],
+            "https://dshm.tmsimg.com/h3/NowShowing/1/s1_ll_h15_ab.png",
+        )
+
+
+class ProgrammeIconTests(unittest.TestCase):
+    def icon(self, program=None, event=None):
+        return zap2xml._program_icon(program or {}, event or {})
+
+    def test_legacy_hosts_and_bare_names_use_the_public_cdn(self):
+        cases = (
+            ({"preferredImage": {"uri": "https://dshm.tmsimg.com/assets/p21040818_p_v9_ab.jpg"}},
+             "https://zpmc.tmsimg.com/assets/p21040818_p_v9_ab.jpg"),
+            ({"image": "http://zap2it.tmsimg.com/assets/GNLZZGG003FKQNX.jpg"},
+             "https://zpmc.tmsimg.com/assets/GNLZZGG003FKQNX.jpg"),
+            ({"image": "//zap2it.tmsimg.com/assets/p1_b_v9_ab.jpg"},
+             "https://zpmc.tmsimg.com/assets/p1_b_v9_ab.jpg"),
+            ({"image": "GNLZZGG003FKQNX.jpg"},
+             "https://zpmc.tmsimg.com/assets/GNLZZGG003FKQNX.jpg"),
+            ({"image": "p21040818_p_v9_ab"},
+             "https://zpmc.tmsimg.com/assets/p21040818_p_v9_ab.jpg"),
+            ({"image": "https://zpmc.tmsimg.com/assets/p1_b_v9_ab.jpg"},
+             "https://zpmc.tmsimg.com/assets/p1_b_v9_ab.jpg"),
+            ({"image": "https://example.com/assets/p1_b_v9_ab.jpg"},
+             "https://example.com/assets/p1_b_v9_ab.jpg"),
+            ({"image": "https://dshm.tmsimg.com/h3/NowShowing/1/s1_ll_h15_ab.png"},
+             "https://dshm.tmsimg.com/h3/NowShowing/1/s1_ll_h15_ab.png"),
+        )
+        for program, expected in cases:
+            with self.subTest(program=program):
+                self.assertEqual(self.icon(program), expected)
+
+    def test_event_thumbnail_is_corrected_and_query_is_stripped(self):
+        self.assertEqual(
+            self.icon({}, {"thumbnail": "https://dshm.tmsimg.com/assets/p1_b_v9_ab.jpg"}),
+            "https://zpmc.tmsimg.com/assets/p1_b_v9_ab.jpg",
+        )
+        self.assertEqual(
+            self.icon({"image": "https://dshm.tmsimg.com/assets/p1_b_v9_ab.jpg?keep=1"}),
+            "https://zpmc.tmsimg.com/assets/p1_b_v9_ab.jpg",
+        )
 
 
 class PluginArtworkTests(unittest.TestCase):
