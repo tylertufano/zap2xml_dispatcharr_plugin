@@ -1,0 +1,186 @@
+name: Release
+
+# Publishes a tagged release and advertises it to Dispatcharr's registry branch.
+# The planner still decides when to release: it merges the packaging PR and pushes
+# an annotated tag on main. Everything after the tag push happens here.
+on:
+  push:
+    tags:
+      - "v*"
+
+# The only workflow with write access. CI keeps contents: read.
+permissions:
+  contents: write
+
+env:
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  release:
+    name: Release ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the tagged commit with full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+
+      - name: Install test dependencies
+        run: python3 -m pip install --disable-pip-version-check requests
+
+      # The tag, plugin.json and both manifests must agree, and the tagged commit
+      # must be on main. This is what stops a stray tag on a feature branch from
+      # publishing.
+      - name: Validate tag
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+          declared=$(python3 -c 'import json; print(json.load(open("src/zap2xml/plugin.json"))["version"])')
+          if [ "$version" != "$declared" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match plugin.json ($declared)"
+            exit 1
+          fi
+
+          python3 - "$version" <<'PY'
+          import json, sys
+          from pathlib import Path
+
+          version = sys.argv[1]
+          root = json.loads(Path("manifest.json").read_text(encoding="utf-8"))["manifest"]["plugins"][0]
+          per_plugin = json.loads(
+              Path("zips/zap2xml/manifest.json").read_text(encoding="utf-8")
+          )["manifest"]
+          problems = []
+          if root.get("latest_version") != version:
+              problems.append(f"manifest.json latest_version is {root.get('latest_version')}")
+          if per_plugin.get("latest", {}).get("version") != version:
+              problems.append(
+                  f"zips/zap2xml/manifest.json latest.version is {per_plugin.get('latest', {}).get('version')}"
+              )
+          if problems:
+              raise SystemExit(f"tag v{version} is not what the manifests list: " + "; ".join(problems))
+          PY
+
+          if ! git rev-parse --verify --quiet origin/main > /dev/null; then
+            echo "::error::origin/main is missing from the checkout"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME is not an ancestor of origin/main"
+            exit 1
+          fi
+
+      - name: Run unit tests
+        run: python3 -m unittest discover -s tests -v
+
+      # Rebuilds the zip from the tagged tree outside the checkout and fails unless
+      # its sha256 is exactly what the manifests advertise.
+      - name: Build and verify the release ZIP
+        run: python3 scripts/build_fork_release.py "$VERSION" --out "$RUNNER_TEMP/dist" --check
+
+      - name: Fail if the release already exists
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            echo "::error::release $GITHUB_REF_NAME already exists; refusing to change it"
+            exit 1
+          fi
+
+      - name: Create the GitHub release
+        run: |
+          set -euo pipefail
+          asset="$RUNNER_TEMP/dist/zap2xml-v$VERSION.zip"
+          notes=""
+          if [ "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = "tag" ]; then
+            notes=$(git tag -l --format='%(contents)' "$GITHUB_REF_NAME")
+          fi
+          if [ -n "$(printf '%s' "$notes" | tr -d '[:space:]')" ]; then
+            gh release create "$GITHUB_REF_NAME" "$asset" \
+              --title "Zap2XML $VERSION" --notes "$notes" --verify-tag
+          else
+            gh release create "$GITHUB_REF_NAME" "$asset" \
+              --title "Zap2XML $VERSION" --generate-notes --verify-tag
+          fi
+
+      - name: Verify the published asset
+        run: |
+          set -euo pipefail
+          gh release download "$GITHUB_REF_NAME" --pattern '*.zip' --dir "$RUNNER_TEMP/published"
+          expected=$(python3 -c 'import json; print(json.load(open("zips/zap2xml/manifest.json"))["manifest"]["latest"]["checksum_sha256"])')
+          actual=$(sha256sum "$RUNNER_TEMP/published/zap2xml-v$VERSION.zip" | awk '{print $1}')
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::published asset is $actual but the manifest lists $expected"
+            exit 1
+          fi
+          gh release view "$GITHUB_REF_NAME" --json url --jq '.url' > "$RUNNER_TEMP/release-url.txt"
+
+      # Dispatcharr's registry reads tufanito, not main. Squash history makes a
+      # main->tufanito PR conflict, so commit the tagged tree directly with a plain
+      # fast-forward push: no force, and no write if tufanito moved meanwhile.
+      - name: Update the tufanito registry branch
+        id: registry
+        run: |
+          set -euo pipefail
+          base=$(git rev-parse origin/tufanito)
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --quiet -B tufanito "$base"
+          git read-tree -u --reset "$GITHUB_SHA"
+          if git diff --cached --quiet; then
+            echo "::error::tufanito already matches $GITHUB_REF_NAME; nothing to advertise"
+            exit 1
+          fi
+          git commit --quiet -m "Advertise Zap2XML $VERSION in the Dispatcharr registry"
+
+          git fetch --quiet --no-tags origin +refs/heads/tufanito:refs/remotes/origin/tufanito
+          if [ "$(git rev-parse origin/tufanito)" != "$base" ]; then
+            echo "::error::tufanito moved from $base while this job ran; not pushing"
+            exit 1
+          fi
+          git push origin HEAD:refs/heads/tufanito
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+          if [ -n "$(git diff --name-only "$GITHUB_SHA" tufanito)" ]; then
+            echo "::error::tufanito tree differs from $GITHUB_REF_NAME"
+            git diff --stat "$GITHUB_SHA" tufanito
+            exit 1
+          fi
+
+      - name: Verify the registry advertises the new version
+        run: |
+          set -euo pipefail
+          advertised=$(gh api -H 'Accept: application/vnd.github.raw' \
+            "repos/$GITHUB_REPOSITORY/contents/manifest.json?ref=tufanito" \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["manifest"]["plugins"][0]["latest_version"])')
+          if [ "$advertised" != "$VERSION" ]; then
+            echo "::error::tufanito advertises $advertised, not $VERSION"
+            exit 1
+          fi
+
+      - name: Job summary
+        if: success()
+        run: |
+          set -euo pipefail
+          sha256=$(python3 -c 'import json; print(json.load(open("zips/zap2xml/manifest.json"))["manifest"]["latest"]["checksum_sha256"])')
+          release_url=$(cat "$RUNNER_TEMP/release-url.txt")
+          {
+            echo "## Zap2XML $VERSION released"
+            echo
+            echo "| item | value |"
+            echo "| --- | --- |"
+            echo "| version | \`$VERSION\` |"
+            echo "| tag | \`$GITHUB_REF_NAME\` |"
+            echo "| zip sha256 | \`$sha256\` |"
+            echo "| release | $release_url |"
+            echo "| tufanito commit | \`${{ steps.registry.outputs.commit }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
