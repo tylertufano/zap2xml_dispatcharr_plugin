@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,11 @@ LEGACY_POSTER = "https://dshm.tmsimg.com/assets/p21040818_p_v9_ab.jpg"
 ICONIC = "https://zpmc.tmsimg.com/assets/p21040818_i_h9_aa.jpg"
 BANNER = "https://zpmc.tmsimg.com/assets/p21040818_b_h8_aa.jpg"
 LINEUPS = ("USA-IL54437-X", "USA-OTA53963")
+
+
+def sd(station_id, style):
+    """A Schedules Direct station-logo URL for the given Gracenote id and style."""
+    return f"https://logos.json.schedulesdirect.org/stationLogos/s{station_id}_{style}_360w_270h.png"
 
 
 def grid_channel(station_id, name, logo, *, asset_id=21040818):
@@ -65,6 +71,7 @@ class ProbeTests(unittest.TestCase):
                 (200, "text/html", signature, "invalid"),
                 (200, content_type, b"bad data", "invalid"),
                 (302, content_type, signature, "temporary"),
+                (403, content_type, signature, "temporary"),
                 (404, content_type, signature, "missing"),
                 (410, content_type, signature, "missing"),
                 (429, content_type, signature, "rate_limited"),
@@ -92,6 +99,21 @@ class ProbeTests(unittest.TestCase):
                         response.read.assert_called_once_with(len(signature))
                     else:
                         response.read.assert_not_called()
+
+    def test_forbidden_is_missing_only_when_requested(self):
+        # The SD logo server returns 403 application/xml for a missing id, so the
+        # station path asks for 403 to be treated as a confirmed miss; posters
+        # keep treating 403 as a transient error.
+        response = MagicMock(status=403, headers=Message())
+        response.headers["Content-Type"] = "application/xml"
+        response.__enter__.return_value = response
+        with patch.object(artwork.http.client, "HTTPSConnection") as factory:
+            factory.return_value.getresponse.return_value = response
+            self.assertEqual(artwork._probe(ESPN, "image/png", artwork.time.monotonic() + 2), "temporary")
+            self.assertEqual(
+                artwork._probe(ESPN, "image/png", artwork.time.monotonic() + 2, forbidden_missing=True),
+                "missing",
+            )
 
     def test_connection_errors_and_timeouts_are_temporary(self):
         for error in (ConnectionError, TimeoutError):
@@ -143,28 +165,89 @@ class ArtworkTests(unittest.TestCase):
         self.probe.assert_not_called()
         self.assertFalse(self.cache.exists())
 
-    def test_station_styles_keep_path_and_asset_and_persist_hits_and_misses(self):
-        self.probe.side_effect = ["missing", "valid", "missing", "missing"]
-        refresh = self.refresh(station_logo_style="white")
+    def test_station_logo_urls_try_station_id_then_logo_id(self):
+        # Order by callSign: ESPN (32645, logo id == station id) before WBBM;
+        # WBBM is station 20454 whose logo file id is 28711, so the SD server is
+        # tried with the station id first and the logo id second.
+        self.probe.side_effect = ["valid", "missing", "valid"]
+        refresh = self.refresh(station_logo_style="dark")
         refresh.apply(self.path, set())
-        espn_white = ESPN.replace("_ll_", "_lw_").replace("_ab.png", "_aa.png")
-        self.assertEqual(icon_urls(self.path, "channel"), {"32645": espn_white, "20454": WBBM})
+        self.assertEqual(icon_urls(self.path, "channel"), {
+            "32645": sd("32645", "dark"),
+            "20454": sd("28711", "dark"),
+        })
         self.assertEqual([args[0] for args, _ in self.probe.call_args_list], [
-            ESPN.replace("_ll_", "_lw_"), espn_white,
-            WBBM.replace("_ll_", "_lw_"), WBBM.replace("_ll_", "_lw_").replace("_ab.png", "_aa.png"),
+            sd("32645", "dark"), sd("20454", "dark"), sd("28711", "dark"),
         ])
-        self.assertIn("selected=1 fallback=1 cache-hit=0 budget-skipped=0 requests=4", refresh.summary())
-        self.assertEqual(sorted(entry[1] for entry in json.loads(self.cache.read_text()).values()), [
-            False, False, False, True,
-        ])
+        self.assertIn("station-logos selected=2 fallback=0 cache-hit=0 budget-skipped=0 requests=3", refresh.summary())
 
+    def test_station_logo_falls_back_to_default_when_nothing_matches(self):
+        self.probe.return_value = "missing"
+        refresh = self.refresh(station_logo_style="dark")
+        refresh.apply(self.path, set())
+        self.assertEqual(icon_urls(self.path, "channel"), {"32645": ESPN, "20454": WBBM})
+        self.assertIn("station-logos selected=0 fallback=2 cache-hit=0 budget-skipped=0 requests=3", refresh.summary())
+
+    def test_station_style_mapping_uses_sd_style_names(self):
+        for style in ("dark", "white", "gray", "light"):
+            with self.subTest(style=style):
+                self.write_guide()
+                self.probe.reset_mock()
+                self.probe.return_value = "valid"
+                refresh = self.refresh(station_logo_style=style)
+                refresh.apply(self.path, set())
+                self.assertEqual(icon_urls(self.path, "channel")["32645"], sd("32645", style))
+                self.assertEqual(self.probe.call_args_list[0].args[0], sd("32645", style))
+                self.assertTrue(self.probe.call_args_list[0].kwargs["forbidden_missing"])
+
+    def test_station_logo_results_and_negatives_persist_across_refreshes(self):
+        self.probe.side_effect = ["valid", "missing", "missing"]
+        refresh = self.refresh(station_logo_style="dark")
+        refresh.apply(self.path, set())
+        self.assertEqual(icon_urls(self.path, "channel"), {"32645": sd("32645", "dark"), "20454": WBBM})
+        self.assertEqual(refresh.station_requests, 3)
+
+        # A repeat refresh must reuse the cache: two cache hits, no probes.
         self.write_guide()
         self.probe.reset_mock()
-        refresh = self.refresh(station_logo_style="white")
+        refresh = self.refresh(station_logo_style="dark")
         refresh.apply(self.path, set())
-        self.assertEqual(icon_urls(self.path, "channel"), {"32645": espn_white, "20454": WBBM})
-        self.assertEqual(refresh.cache_hits, 2)
+        self.assertEqual(icon_urls(self.path, "channel"), {"32645": sd("32645", "dark"), "20454": WBBM})
+        self.assertEqual(refresh.station_cache_hits, 2)
+        self.assertEqual(refresh.station_requests, 0)
         self.probe.assert_not_called()
+
+    def test_station_logo_non_image_response_falls_through_to_logo_id(self):
+        self.probe.side_effect = ["valid", "invalid", "valid"]
+        refresh = self.refresh(station_logo_style="dark")
+        refresh.apply(self.path, set())
+        self.assertEqual(icon_urls(self.path, "channel"), {
+            "32645": sd("32645", "dark"),
+            "20454": sd("28711", "dark"),
+        })
+
+    def test_station_logo_budget_is_separate_from_poster_budget(self):
+        refresh = self.refresh(
+            station_logo_style="dark", programme_artwork_style="landscape_iconic",
+            station_logo_request_limit=1, artwork_request_limit=128,
+        )
+        self.assertEqual(refresh.station_limit, 1)
+        self.assertEqual(refresh.request_limit, 128)
+        refresh.apply(self.path, {"32645"})
+        # Exactly one station probe ran; the second station hit the station cap
+        # while posters keep their own (untouched) 128 budget.
+        self.assertEqual(refresh.station_requests, 1)
+        self.assertEqual(refresh.station_budget_skipped, 1)
+        self.assertEqual(refresh.requests, 1)
+
+    def test_station_logo_budget_default_and_validation(self):
+        self.assertEqual(self.refresh().station_limit, 2500)
+        self.assertEqual(self.refresh().request_limit, 128)
+        self.assertEqual(self.refresh(station_logo_request_limit="300").station_limit, 300)
+        self.assertEqual(self.refresh(station_logo_request_limit=0).station_limit, 0)
+        self.assertEqual(self.refresh(station_logo_request_limit=-1).station_limit, 2500)
+        self.assertIn("request-limit=128", self.refresh().summary())
+        self.assertIn("request-limit=2500", self.refresh(station_logo_style="dark").summary())
 
     def test_programme_styles_check_only_mapped_stations_and_deduplicate_events(self):
         self.channels[0]["events"] *= 2
@@ -185,6 +268,9 @@ class ArtworkTests(unittest.TestCase):
                     (expected, "image/jpeg"),
                 ])
                 self.assertEqual(refresh.selected, 2)
+                # Posters never ask for forbidden-as-missing.
+                for probe_call in self.probe.call_args_list:
+                    self.assertNotIn("forbidden_missing", probe_call.kwargs)
 
     def test_portrait_sizes_and_suffixes_are_tried_in_order(self):
         for style, asset, sizes, selected in (
@@ -217,11 +303,11 @@ class ArtworkTests(unittest.TestCase):
         self.probe.assert_called_once()
         self.assertEqual(self.probe.call_args.args[:2], (square, "image/jpeg"))
         source = square.replace("zpmc", "dshm").replace("_ab.jpg", "_aa.jpg")
-        candidates = artwork.candidates(source, artwork.PROGRAMME_STYLES["portrait_iconic"], station=False)
+        candidates = artwork.candidates(source, artwork.PROGRAMME_STYLES["portrait_iconic"])
         self.assertEqual(candidates, tuple(
             f"https://zpmc.tmsimg.com/assets/p18535690_i_{size}_aa.jpg" for size in ("v8", "v12", "v9", "v13")
         ))
-        self.assertEqual(artwork.candidates(source + "?extra", ("i_s4",), station=False), ())
+        self.assertEqual(artwork.candidates(source + "?extra", ("i_s4",)), ())
 
     def test_portrait_misses_share_the_budget_and_persist(self):
         original = self.path.read_bytes()
@@ -262,33 +348,47 @@ class ArtworkTests(unittest.TestCase):
         )
 
     def test_artwork_off_omits_programme_icons_and_still_selects_station_style(self):
-        baseline = ET.parse(self.path)
-        for event in baseline.iterfind("./programme"):
-            event.remove(event.find("icon"))
-        for icon in baseline.iterfind("./channel/icon"):
-            icon.set("src", icon.get("src").replace("_ll_", "_lg_"))
         refresh = self.refresh(
             station_logo_style="gray", programme_artwork_style="landscape_banner", include_programme_artwork=False,
         )
         refresh.apply(self.path, {"32645", "20454"})
-        self.assertEqual(ET.tostring(ET.parse(self.path).getroot()), ET.tostring(baseline.getroot()))
-        self.assertEqual([args[:2] for args, _ in self.probe.call_args_list], [
-            (ESPN.replace("_ll_", "_lg_"), "image/png"), (WBBM.replace("_ll_", "_lg_"), "image/png"),
-        ])
+        # programme icons are omitted; station logos still become SD gray URLs.
+        self.assertEqual(icon_urls(self.path, "channel"), {"32645": sd("32645", "gray"), "20454": sd("20454", "gray")})
+        self.assertEqual(icon_urls(self.path, "programme"), {})
+        self.assertEqual([args[0] for args, _ in self.probe.call_args_list], [sd("32645", "gray"), sd("20454", "gray")])
 
-    def test_unrecognized_urls_and_identical_suffix(self):
-        for url in (
+    def test_unrecognized_station_urls_have_no_sd_candidates(self):
+        for original in (
             ESPN.replace("zpmc.tmsimg.com", "zpmc.tmsimg.com.example.com"),
-            ESPN.replace("zpmc.tmsimg.com", "zpmc.tmsimg.com@localhost"),
-            ESPN.replace("zpmc.tmsimg.com", "zpmc.tmsimg.com:443"),
-            ESPN.replace("/h3/", "/../"), ESPN.replace("_ll_", "_zz_"),
-            ESPN.replace("s32645", "arbitrary"), ESPN + "#fragment", "not a URL",
+            "not a URL",
+            "https://example.com/assets/p1_b_v9_ab.jpg",
+        ):
+            with self.subTest(original=original):
+                self.assertEqual(artwork._station_logo_id(original), None)
+        self.assertEqual(artwork._station_logo_id(ESPN), "32645")
+        self.assertEqual(artwork._station_logo_id(WBBM), "28711")
+        self.assertEqual(artwork._station_logo_candidates("32645", "32645", "dark"), (sd("32645", "dark"),))
+        self.assertEqual(
+            artwork._station_logo_candidates("20454", "28711", "dark"),
+            (sd("20454", "dark"), sd("28711", "dark")),
+        )
+        self.assertEqual(artwork._station_logo_candidates("", "28711", "dark"), (sd("28711", "dark"),))
+        self.assertEqual(artwork._station_logo_candidates("abc", "", "dark"), ())
+
+    def test_unrecognized_poster_urls_and_identical_suffix(self):
+        for url in (
+            POSTER.replace("zpmc.tmsimg.com", "zpmc.tmsimg.com.example.com"),
+            POSTER.replace("zpmc.tmsimg.com", "zpmc.tmsimg.com@localhost"),
+            POSTER.replace("zpmc.tmsimg.com", "zpmc.tmsimg.com:443"),
+            POSTER.replace("/assets/", "/../assets/"),
+            POSTER.replace("p21040818", "arbitrary"),
+            POSTER + "#fragment", "not a URL",
         ):
             with self.subTest(url=url):
-                self.assertEqual(artwork.candidates(url, "lg", station=True), ())
+                self.assertEqual(artwork.candidates(url, "i_h9"), ())
         suffix_aa = POSTER.replace("_ab.jpg", "_aa.jpg")
-        self.assertEqual(artwork.candidates(suffix_aa, "i_h9", station=False), (ICONIC,))
-        self.assertEqual(artwork.candidates(POSTER.replace("/assets/", "/unknown/"), "i_h9", station=False), ())
+        self.assertEqual(artwork.candidates(suffix_aa, "i_h9"), (ICONIC,))
+        self.assertEqual(artwork.candidates(POSTER.replace("/assets/", "/unknown/"), "i_h9"), ())
 
     def test_429_stops_new_requests_and_transient_failure_is_retried_next_refresh(self):
         self.probe.side_effect = ["temporary", "rate_limited"]
@@ -299,10 +399,11 @@ class ArtworkTests(unittest.TestCase):
         self.assertEqual(self.probe.call_count, 2)
         self.assertEqual(json.loads(self.cache.read_text()), {})
         self.probe.side_effect = None
+        self.probe.reset_mock()
         refresh = self.refresh(station_logo_style="dark")
         refresh.apply(self.path, set())
-        self.assertEqual(icon_urls(self.path, "channel")["32645"], ESPN.replace("_ll_", "_ld_"))
-        self.assertEqual(self.probe.call_count, 4)
+        self.assertEqual(icon_urls(self.path, "channel")["32645"], sd("32645", "dark"))
+        self.assertEqual(self.probe.call_count, 2)
 
     def test_corrupt_cache_recovers_and_unwritable_cache_keeps_originals(self):
         self.cache.write_bytes(b"{invalid json")
@@ -356,17 +457,21 @@ class ArtworkTests(unittest.TestCase):
         now = artwork.time.time()
         with patch.object(artwork.time, "time", return_value=now + artwork.MISS_AGE + 1):
             self.refresh(station_logo_style="white").apply(self.path, set())
-        self.assertEqual(self.probe.call_count, 4)
+        self.assertEqual(self.probe.call_count, 3)
+
+    def test_negatives_use_a_seven_day_ttl(self):
+        self.assertEqual(artwork.MISS_AGE, 7 * 24 * 60 * 60)
 
     def test_elapsed_lookup_limit_stops_waiting_and_prevents_further_requests(self):
         release = threading.Event()
         self.addCleanup(release.set)
-        self.probe.side_effect = lambda *_: release.wait(5)
+        self.probe.side_effect = lambda *args, **kwargs: release.wait(5)
         with patch.object(artwork, "MAX_LOOKUP_SECONDS", 0.02):
             refresh = self.refresh(station_logo_style="white")
             refresh.apply(self.path, set())
-        self.assertEqual(refresh.requests, 1)
-        self.assertEqual(refresh.budget_skipped, 1)
+        self.assertEqual(refresh.station_requests, 1)
+        self.assertEqual(refresh.station_budget_skipped, 1)
+        self.assertEqual(refresh.station_fallback, 2)
         self.assertEqual(icon_urls(self.path, "channel"), {"32645": ESPN, "20454": WBBM})
 
     def test_station_elapsed_share_leaves_time_for_programme_requests(self):
@@ -384,14 +489,15 @@ class ArtworkTests(unittest.TestCase):
         release = threading.Event()
         self.addCleanup(release.set)
 
-        def probe(_url, content_type, _deadline):
+        def probe(_url, content_type, _deadline, forbidden_missing=False):
             return release.wait(5) if content_type == "image/png" else "valid"
 
         self.probe.side_effect = probe
         refresh = self.refresh(station_logo_style="white", programme_artwork_style="landscape_iconic")
         with patch.object(artwork, "REQUEST_SECONDS", 0.1):
             refresh.apply(self.path, {"32645"})
-        self.assertEqual(refresh.requests, 2)
+        self.assertEqual(refresh.station_requests, 1)
+        self.assertEqual(refresh.requests, 1)
         self.assertEqual(refresh.timed_out_types, {"image/png"})
         self.assertEqual(icon_urls(self.path, "programme")["32645"], ICONIC.replace("_aa.jpg", "_ab.jpg"))
 
@@ -473,20 +579,11 @@ class ArtworkTests(unittest.TestCase):
             "https://dshm.tmsimg.com/h3/NowShowing/1/s1_ll_h15_ab.png",
         )
 
-
-    def test_default_request_budget_and_poster_reservation(self):
-        refresh = self.refresh()
-        self.assertEqual(refresh.request_limit, 128)
-        self.assertEqual(refresh.poster_reservation_percent, 25)
-        refresh.reserve_programme = True
-        self.assertEqual(refresh.reserved_requests, 32)
-        self.assertIn("request-limit=128 reserved=32", refresh.summary())
-
     def test_request_limit_above_default(self):
         refresh = self.refresh(artwork_request_limit=200)
         self.assertEqual(refresh.request_limit, 200)
         for _ in range(129):
-            self.assertEqual(refresh._request(ESPN, "image/png"), "valid")
+            self.assertEqual(refresh._request(LEGACY_POSTER, "image/jpeg"), "valid")
         self.assertEqual(refresh.requests, 129)
 
     def test_zero_request_limit_reuses_cached_variants(self):
@@ -495,43 +592,30 @@ class ArtworkTests(unittest.TestCase):
             hashlib.sha256(f"i_h9\0{POSTER}\0{ICONIC}".encode()).hexdigest(): [expires, True],
         }))
         refresh = self.refresh(programme_artwork_style="landscape_iconic", artwork_request_limit=0)
-        refresh.reserve_programme = True
         refresh.apply(self.path, {"32645"})
         self.assertEqual(icon_urls(self.path, "programme")["32645"], ICONIC)
         self.probe.assert_not_called()
         self.assertEqual(refresh.requests, 0)
 
-    def test_poster_reservation_custom_zero_and_full(self):
-        for percent, reserved in ((50, 1), (0, 0), (100, 2)):
-            refresh = self.refresh(artwork_request_limit=2, poster_request_reservation_percent=percent)
-            refresh.reserve_programme = True
-            with self.subTest(percent=percent):
-                self.assertEqual(refresh.reserved_requests, reserved)
-        refresh = self.refresh(artwork_request_limit=2, poster_request_reservation_percent=50)
-        refresh.reserve_programme = True
-        self.assertEqual(refresh._request(ESPN, "image/png"), "valid")
-        self.assertEqual(refresh._request(ESPN, "image/png"), "budget")
-        refresh = self.refresh(artwork_request_limit=2, poster_request_reservation_percent=100)
-        refresh.reserve_programme = True
-        self.assertEqual(refresh._request(ESPN, "image/png"), "budget")
-        refresh = self.refresh(artwork_request_limit=2, poster_request_reservation_percent=0)
-        refresh.reserve_programme = True
-        for _ in range(2):
-            self.assertEqual(refresh._request(ESPN, "image/png"), "valid")
-        self.assertEqual(refresh._request(ESPN, "image/png"), "budget")
+    def test_zero_station_limit_reuses_cached_variants(self):
+        expires = int(artwork.time.time()) + 60
+        self.cache.write_text(json.dumps({
+            hashlib.sha256(f"dark\0{32645}\0{sd('32645', 'dark')}".encode()).hexdigest(): [expires, True],
+        }))
+        refresh = self.refresh(station_logo_style="dark", station_logo_request_limit=0)
+        refresh.apply(self.path, set())
+        self.assertEqual(icon_urls(self.path, "channel")["32645"], sd("32645", "dark"))
+        self.probe.assert_not_called()
+        self.assertEqual(refresh.station_requests, 0)
 
     def test_invalid_request_settings_use_defaults(self):
         for value in (True, False, 12.5, -1, "abc", "12.5", "\u00b2", "\u0661\u0662", "", "  ", None, [], {}):
             with self.subTest(value=value):
-                refresh = self.refresh(artwork_request_limit=value, poster_request_reservation_percent=value)
+                refresh = self.refresh(artwork_request_limit=value, station_logo_request_limit=value)
                 self.assertEqual(refresh.request_limit, 128)
-                self.assertEqual(refresh.poster_reservation_percent, 25)
-        for value in (-1, 101, 25.5, True, "101"):
-            with self.subTest(reservation=value):
-                refresh = self.refresh(poster_request_reservation_percent=value)
-                self.assertEqual(refresh.poster_reservation_percent, 25)
+                self.assertEqual(refresh.station_limit, 2500)
         self.assertEqual(self.refresh(artwork_request_limit="200").request_limit, 200)
-        self.assertEqual(self.refresh(poster_request_reservation_percent="0").poster_reservation_percent, 0)
+        self.assertEqual(self.refresh(station_logo_request_limit="300").station_limit, 300)
 
     def test_whole_setting_rejects_invalid_persisted_strings(self):
         for value in ("", " ", "abc", "12.5", "-1", "+1", "1 2", "\u00b2", "\u0661\u0662", "1\u00b2"):
@@ -541,26 +625,10 @@ class ArtworkTests(unittest.TestCase):
         self.assertEqual(artwork._whole_setting(" 0 ", 128, 0), 0)
         self.assertEqual(artwork._whole_setting(" 200 ", 128, 0), 200)
 
-    def test_reservation_requires_styled_programme_artwork(self):
-        refresh = self.refresh(
-            programme_artwork_style="provider_default",
-            include_programme_artwork=True,
-            poster_request_reservation_percent=50,
-        )
-        self.assertFalse(refresh.reserve_programme)
-        self.assertEqual(refresh.reserved_requests, 0)
-        refresh = self.refresh(
-            programme_artwork_style="landscape_iconic",
-            include_programme_artwork=False,
-            poster_request_reservation_percent=50,
-        )
-        self.assertFalse(refresh.reserve_programme)
-        self.assertEqual(refresh.reserved_requests, 0)
-
-    def test_one_request_cap_is_shared_across_outputs(self):
-        refresh = self.refresh(station_logo_style="white", artwork_request_limit=2)
+    def test_one_station_budget_is_shared_across_outputs(self):
+        refresh = self.refresh(station_logo_style="white", station_logo_request_limit=1)
         refresh.apply(self.path, set())
-        self.assertEqual(refresh.requests, 2)
+        self.assertEqual(refresh.station_requests, 1)
         other = self.root / "other.xml"
         channels = [
             grid_channel("11111", "Other", "https://zpmc.tmsimg.com/h3/NowShowing/11111/s11111_ll_h15_ab.png"),
@@ -568,8 +636,8 @@ class ArtworkTests(unittest.TestCase):
         ]
         zap2xml.write_xmltv(channels, other)
         refresh.apply(other, set())
-        self.assertLessEqual(refresh.requests, 2)
-        self.assertGreater(refresh.budget_skipped, 0)
+        self.assertLessEqual(refresh.station_requests, 1)
+        self.assertGreater(refresh.station_budget_skipped, 0)
 
 
 class ProgrammeIconTests(unittest.TestCase):
@@ -645,48 +713,57 @@ class PluginArtworkTests(unittest.TestCase):
         self.sources[epg_name] = xml_path
         return {"status": "ok", "epg_name": epg_name, "file": xml_path}
 
-    def test_manual_separate_lineups_share_one_cap_and_prioritize_station_logos(self):
+    def test_separate_lineups_use_sd_station_logos_and_a_shared_station_budget(self):
         self.settings["station_logo_style"] = "white"
         self.mapped.side_effect = [set(), {"20454"}]
-        self.assertFalse((self.root / ".artwork-cache.json").exists())
-        unmapped_count = artwork.MAX_REQUESTS + 12
-
-        def run_lineup(*, lineup_id, **_kwargs):
-            if lineup_id == LINEUPS[1]:
-                return self.run_lineup(lineup_id=lineup_id)
-            path = self.root / f"{lineup_id}.xml"
-            stations = [
-                grid_channel(str(i), f"Unmapped {i}", ESPN.replace("32645", str(i)), asset_id=30000 + i)
-                for i in range(unmapped_count)
-            ]
-            zap2xml.write_xmltv(stations, path)
-            return "ok", str(path), "ok", "fixture command"
-
-        self.instance._run_zap2it_script.side_effect = run_lineup
         result = self.instance.run("download_epg", {}, {"settings": self.settings, "logger": self.logger})
         self.assertEqual(result["status"], "queued")
         self.assertEqual(self.mapped.call_args_list, [call(f"Zap2XML ({lu})") for lu in LINEUPS])
-        requests = [args[:2] for args, _ in self.probe.call_args_list]
-        self.assertEqual(requests[0], (WBBM.replace("_ll_", "_lw_"), "image/png"))
-        self.assertEqual(sum(content_type == "image/png" for _, content_type in requests), 96)
-        self.assertEqual([url for url, content_type in requests if content_type == "image/jpeg"], [
-            "https://zpmc.tmsimg.com/assets/p28711_i_h9_ab.jpg",
-        ])
-        self.assertEqual(len(requests), 97)
+        requests = list(self.probe.call_args_list)
+        # Mapped station 20454 is resolved first (prepare_mapped_logos), then the
+        # stations in output order, using the SD logo-server URLs.
+        self.assertEqual(requests[0].args[0], sd("20454", "white"))
+        self.assertTrue(requests[0].kwargs["forbidden_missing"])
         unmapped_guide = self.sources[f"Zap2XML ({LINEUPS[0]})"]
-        self.assertEqual(sum("_lw_" in url for url in icon_urls(unmapped_guide, "channel").values()), 95)
-        self.assertEqual(icon_urls(unmapped_guide, "programme"), {
-            str(i): POSTER.replace("21040818", str(30000 + i)) for i in range(unmapped_count)
-        })
+        self.assertEqual(icon_urls(unmapped_guide, "channel"), {"32645": sd("32645", "white")})
         mapped_guide = self.sources[f"Zap2XML ({LINEUPS[1]})"]
-        self.assertEqual(icon_urls(mapped_guide, "channel"), {
-            "20454": WBBM.replace("_ll_", "_lw_"),
-        })
+        self.assertEqual(icon_urls(mapped_guide, "channel"), {"20454": sd("20454", "white")})
         self.assertEqual(icon_urls(mapped_guide, "programme"), {
             "20454": "https://zpmc.tmsimg.com/assets/p28711_i_h9_ab.jpg",
         })
         self.logger.info.assert_called_once()
-        self.assertIn("selected=97 fallback=45 cache-hit=0 budget-skipped=45 requests=97", self.logger.info.call_args.args[0])
+        summary = self.logger.info.call_args.args[0]
+        self.assertIn("station-logos selected=2 fallback=0 cache-hit=0 budget-skipped=0 requests=2", summary)
+
+    def test_two_consecutive_downloads_reuse_the_artwork_cache(self):
+        self.settings["station_logo_style"] = "dark"
+        self.settings["programme_artwork_style"] = "provider_default"
+        self.mapped.return_value = set()
+
+        # The real workspace cleanup removes transient xmltv files and the
+        # cache/ directory but must leave .artwork-cache.json untouched.
+        def real_cleanup(logger=None):
+            for name in os.listdir(self.root):
+                if name.startswith("xmltv_") and name.endswith(".xml"):
+                    (self.root / name).unlink(missing_ok=True)
+            cache_dir = self.root / "cache"
+            if cache_dir.is_dir():
+                shutil.rmtree(cache_dir)
+
+        self.instance._cleanup_plugin_workspace.side_effect = real_cleanup
+
+        first = self.instance.run("download_epg", {}, {"settings": self.settings, "logger": self.logger})
+        self.assertEqual(first["status"], "queued")
+        self.assertIn("station-logos selected=2", self.logger.info.call_args.args[0])
+
+        self.probe.reset_mock()
+        self.logger.reset_mock()
+        second = self.instance.run("download_epg", {}, {"settings": self.settings, "logger": self.logger})
+        self.assertEqual(second["status"], "queued")
+        self.probe.assert_not_called()
+        summary = self.logger.info.call_args.args[0]
+        self.assertIn("station-logos selected=2 fallback=0 cache-hit=2", summary)
+        self.assertIn("station-logos selected=2 fallback=0 cache-hit=2 budget-skipped=0 requests=0", summary)
 
     def test_scheduled_merged_download_uses_merged_source_mapping(self):
         self.settings["merge_lineups"] = True
@@ -694,7 +771,7 @@ class PluginArtworkTests(unittest.TestCase):
         published.parent.mkdir()
         published.write_text("previous guide")
 
-        def probe(*_):
+        def probe(*args, **kwargs):
             return "valid" if published.read_text() == "previous guide" else "temporary"
 
         self.probe.side_effect = probe

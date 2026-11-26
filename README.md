@@ -43,7 +43,10 @@ Dispatcharr worker processes. Install updates from the plugin repository:
 
 #### Artwork preferences
 
-- **Station Logo Style** offers Provider Default, Dark, White, Gray, and Light. This sets the station icon in the XMLTV guide. Dispatcharr's EPG logo controls handle assigning those icons to channels.
+- **Station Logo Style** offers Provider Default, Dark, White, Gray, and Light. A named style points station
+  icons at Schedules Direct's public logo server (`logos.json.schedulesdirect.org`), which serves true dark,
+  white, gray, and light art for the same Gracenote station ids. Dispatcharr's EPG logo controls handle
+  assigning those icons to channels.
 - **Include Programme Artwork** is on by default. Turn it off to omit programme icons.
 - **Programme Artwork Style** offers Provider Default, Landscape Iconic, Landscape Banner with Title,
   Portrait Banner with Title (2:3 / 3:4), Portrait Iconic (2:3 / 3:4), and Square Iconic (1:1). Iconic art
@@ -51,9 +54,17 @@ Dispatcharr worker processes. Install updates from the plugin repository:
   for stations already mapped to the matching Zap2XML EPG source, including the merged source. New sources
   use supplied artwork until stations are mapped and the guide refreshes again.
 
-Saved settings take effect on the next manual or scheduled Zap2XML download. Provider Default uses the supplied icon URLs as-is. An alternative is used only after its image type and signature are verified. Missing, unavailable, or unrecognized variants fall back to the supplied icon.
+Saved settings take effect on the next manual or scheduled Zap2XML download. Provider Default uses the supplied icon URLs as-is. A station logo is replaced only after the Schedules Direct image type and signature are verified (station id first, then the logo-file id in the supplied URL); a station with no art in that style keeps the supplied icon. Programme art is used only after its image type and signature are verified, and missing, unavailable, or unrecognized variants fall back to the supplied icon.
 
-Each refresh allows up to 128 artwork requests and 25 seconds of cumulative request time across all lineups, with up to 2 seconds per request. The plugin checks mapped station logos first. With both styles enabled and mapped stations present, station logos can use at most 96 requests and two-thirds of the lookup time, leaving the rest available for programme artwork. A wall-clock timeout stops requests for that artwork type. HTTP 429 stops discovery requests for both types. The persistent cache holds up to 8,192 results, with verified images cached for 30 days and confirmed misses for two days. The refresh log counts icon selections, fallbacks, cache hits, and instances skipped when a request budget runs out.
+Station logos and programme art draw from separate request budgets. Station-logo checks use up to 2,500 probes
+per refresh (the **Station logo request limit** setting); programme art uses up to 128 (the **Artwork lookup
+request limit**). Each refresh also allows up to 25 seconds of cumulative request time across all lineups, with
+up to 2 seconds per request. Station-logo checks leave two-thirds of the wall-clock time for programme art
+when both are active on mapped stations. A wall-clock timeout stops requests for that artwork type. HTTP 429
+stops discovery requests for both types. The persistent cache holds up to 8,192 results, with verified images
+cached for 30 days and confirmed misses (including a station with no logo in the chosen style) for seven days.
+The refresh log reports an `artwork` line for programme art and a `station-logos` line for station icons,
+counting selections, fallbacks, cache hits, and requests.
 
 
 
