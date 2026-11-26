@@ -16,7 +16,10 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 
-STATION_STYLES = {"dark": "ld", "white": "lw", "gray": "lg", "light": "ll"}
+# Schedules Direct logo server: same Gracenote station id space, public, no auth.
+# <style> is one of dark|light|white|gray, matching the plugin's UI option values.
+SD_LOGO_HOST = "logos.json.schedulesdirect.org"
+SD_LOGO_STYLES = ("dark", "white", "gray", "light")
 PROGRAMME_STYLES = {
     "landscape_iconic": ("i_h9",),
     "landscape_banner": ("b_h8",),
@@ -37,13 +40,13 @@ PROGRAMME_PATH = re.compile(
 )
 IMAGE_SIGNATURES = {"image/png": b"\x89PNG\r\n\x1a\n", "image/jpeg": b"\xff\xd8\xff"}
 MAX_REQUESTS = 128
-DEFAULT_POSTER_RESERVATION_PERCENT = 25
+DEFAULT_STATION_LOGO_REQUEST_LIMIT = 2500
 MAX_LOOKUP_SECONDS = 25
 REQUEST_SECONDS = 2
 CACHE_ENTRIES = 8192
 CACHE_READ_BYTES = 1024 * 1024
 HIT_AGE = 30 * 24 * 60 * 60
-MISS_AGE = 2 * 24 * 60 * 60
+MISS_AGE = 7 * 24 * 60 * 60
 
 
 def _whole_setting(value, default, minimum, maximum=None):
@@ -78,30 +81,65 @@ def _whole_setting(value, default, minimum, maximum=None):
     return number
 
 
-def candidates(original, style, *, station):
+def candidates(original, style):
     url = PROVIDER_URL.fullmatch(original)
     if not url or url["host"] not in HOSTS:
         return ()
 
-    if station:
-        asset = STATION_PATH.fullmatch(url["path"])
-        if not asset:
-            return ()
-        stems = (f"https://{url['host']}{asset['prefix']}{asset['asset']}_{style}_{asset['size']}",)
-        extension = "png"
-    else:
-        asset = PROGRAMME_PATH.fullmatch(url["path"])
-        if not asset:
-            return ()
-        variants = (style,) if isinstance(style, str) else style
-        stems = (f"https://{CDN_HOST}/assets/{asset['asset']}_{variant}" for variant in variants)
-        extension = "jpg"
-
+    asset = PROGRAMME_PATH.fullmatch(url["path"])
+    if not asset:
+        return ()
+    variants = (style,) if isinstance(style, str) else style
+    stems = (f"https://{CDN_HOST}/assets/{asset['asset']}_{variant}" for variant in variants)
     suffixes = dict.fromkeys((asset["suffix"], "aa"))
-    return tuple(f"{stem}_{suffix}.{extension}" for stem in stems for suffix in suffixes)
+    return tuple(f"{stem}_{suffix}.jpg" for stem in stems for suffix in suffixes)
 
 
-def _probe(url, content_type, deadline):
+def _station_logo_id(original):
+    """Return the Gracenote asset id (the digits after ``s``) from a station logo URL.
+
+    The logo file id in Zap2XML's default URL can differ from the station id
+    (station 111003 -> ``s141469_ll_h15_aa.png``), so it is read back from the URL
+    rather than assumed equal to the station id. Returns ``None`` when the URL is
+    not a recognised Gracenote station logo.
+    """
+    if not isinstance(original, str):
+        return None
+    try:
+        parts = urlsplit(original)
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https"):
+        return None
+    if parts.hostname not in HOSTS:
+        return None
+    match = STATION_PATH.fullmatch(parts.path)
+    if not match:
+        return None
+    return match["asset"][1:]
+
+
+def _station_logo_candidates(station_id, logo_id, style):
+    """SD logo-server URLs to try in order: station id, then the URL's logo id.
+
+    Only non-empty, decimal identifiers are emitted. A missing or non-image
+    response for one candidate falls through to the next; ``()`` keeps the
+    provider's default logo.
+    """
+    ordered = []
+    seen = set()
+    for identifier in (station_id, logo_id):
+        value = str(identifier).strip() if identifier is not None else ""
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        if not re.fullmatch(r"[0-9]{1,16}", value):
+            continue
+        ordered.append(f"https://{SD_LOGO_HOST}/stationLogos/s{value}_{style}_360w_270h.png")
+    return tuple(ordered)
+
+
+def _probe(url, content_type, deadline, forbidden_missing=False):
     """Read only enough bytes to check the expected image signature."""
     parsed = urlsplit(url)
     remaining = deadline - time.monotonic()
@@ -118,6 +156,11 @@ def _probe(url, content_type, deadline):
             if response.status == 429:
                 return "rate_limited"
             if response.status in (404, 410):
+                return "missing"
+            if forbidden_missing and response.status == 403:
+                # The SD logo server returns 403 application/xml for an id that
+                # has no art in this style (S3-style), not 404. Treat it as a
+                # confirmed miss so it is cached as a negative.
                 return "missing"
             if response.status not in (200, 206):
                 return "temporary"
@@ -179,7 +222,7 @@ class ArtworkRefresh:
         settings = settings if isinstance(settings, dict) else {}
         station = settings.get("station_logo_style")
         programme = settings.get("programme_artwork_style")
-        self.station_style = STATION_STYLES.get(station) if isinstance(station, str) else None
+        self.station_style = station if station in SD_LOGO_STYLES else None
         self.programme_style = PROGRAMME_STYLES.get(programme) if isinstance(programme, str) else None
         self.include_programme = settings.get("include_programme_artwork") is not False
         if not self.include_programme:
@@ -187,9 +230,8 @@ class ArtworkRefresh:
         self.request_limit = _whole_setting(
             settings.get("artwork_request_limit"), MAX_REQUESTS, 0,
         )
-        self.poster_reservation_percent = _whole_setting(
-            settings.get("poster_request_reservation_percent"),
-            DEFAULT_POSTER_RESERVATION_PERCENT, 0, 100,
+        self.station_limit = _whole_setting(
+            settings.get("station_logo_request_limit"), DEFAULT_STATION_LOGO_REQUEST_LIMIT, 0,
         )
 
         self.cache_path = cache_path
@@ -211,6 +253,10 @@ class ArtworkRefresh:
         self.fallback = 0
         self.cache_hits = 0
         self.budget_skipped = 0
+        self.station_selected = 0
+        self.station_fallback = 0
+        self.station_cache_hits = 0
+        self.station_budget_skipped = 0
 
     @property
     def enabled(self):
@@ -219,13 +265,6 @@ class ArtworkRefresh:
     @property
     def uses_mappings(self):
         return bool(self.station_style or self.programme_style)
-
-    @property
-    def reserved_requests(self):
-        """Request slots kept for programme posters when the reservation applies."""
-        if not self.reserve_programme or self.poster_reservation_percent <= 0 or self.request_limit <= 0:
-            return 0
-        return max(1, (self.request_limit * self.poster_reservation_percent) // 100)
 
     def _load_cache(self):
         self.cache_loaded = True
@@ -269,16 +308,19 @@ class ArtworkRefresh:
             self.cache_writable = False
         self.cache_dirty = False
 
-    def _request(self, url, content_type):
+    def _request(self, url, content_type, *, forbidden_missing=False):
         if self.rate_limited:
             return "temporary"
         station = content_type == "image/png"
         remaining = MAX_LOOKUP_SECONDS - self.lookup_seconds
         if station and self.reserve_programme:
-            if self.station_requests >= self.request_limit - self.reserved_requests:
-                return "budget"
+            # Leave part of the shared wall clock for programme posters.
             remaining = min(remaining, MAX_LOOKUP_SECONDS * 2 / 3 - self.station_seconds)
-        if self.requests >= self.request_limit or remaining <= 0 or content_type in self.timed_out_types:
+        if station:
+            over_budget = self.station_requests >= self.station_limit
+        else:
+            over_budget = self.requests >= self.request_limit
+        if over_budget or remaining <= 0 or content_type in self.timed_out_types:
             return "budget"
 
         limit = min(REQUEST_SECONDS, remaining)
@@ -291,13 +333,15 @@ class ArtworkRefresh:
         def probe():
             if self.rate_limited:
                 return
-            status = _probe(url, content_type, deadline)
+            if forbidden_missing:
+                status = _probe(url, content_type, deadline, forbidden_missing=True)
+            else:
+                status = _probe(url, content_type, deadline)
             if status == "rate_limited":
                 self.rate_limited = True
             result.append(status)
 
         worker = threading.Thread(target=contextvars.copy_context().run, args=(probe,), daemon=True)
-        self.requests += 1
         worker.start()
         worker.join(max(0, deadline - time.monotonic()))
         elapsed = time.monotonic() - started
@@ -305,6 +349,8 @@ class ArtworkRefresh:
         if station:
             self.station_requests += 1
             self.station_seconds += elapsed
+        else:
+            self.requests += 1
         if worker.is_alive():
             # Bound overdue workers to one per type while the other type can
             # still use its share of the refresh budget.
@@ -312,8 +358,8 @@ class ArtworkRefresh:
             return "temporary"
         return result[0] if result else "temporary"
 
-    def _select(self, original, style, station):
-        variants = candidates(original, style, station=station)
+    def _select(self, original, style):
+        variants = candidates(original, style)
         if not variants:
             return None, False, False
         if not self.cache_loaded:
@@ -321,13 +367,13 @@ class ArtworkRefresh:
         if not self.cache_writable:
             return None, False, False
 
-        content_type = "image/png" if station else "image/jpeg"
+        content_type = "image/jpeg"
         cache_hit = False
         # The first variant identifies the style and keeps existing landscape cache keys valid.
         cache_style = style[0] if isinstance(style, tuple) else style
         previous_urls = ()
         cdn_origin = f"https://{CDN_HOST}"
-        if not station and original.startswith(f"{cdn_origin}/assets/"):
+        if original.startswith(f"{cdn_origin}/assets/"):
             # Before the base URL correction, programme icons used a legacy host.
             # Reuse those cache entries and migrate them to the current origin.
             path = original.removeprefix(cdn_origin)
@@ -372,25 +418,75 @@ class ArtworkRefresh:
                 return None, cache_hit, False
         return None, cache_hit, budget_skipped
 
-    def _resolve(self, icon, style, *, station, report=True):
+    def _select_station(self, station_id, original, style):
+        logo_id = _station_logo_id(original)
+        variants = _station_logo_candidates(station_id, logo_id, style)
+        if not variants:
+            return None, False, False
+        if not self.cache_loaded:
+            self._load_cache()
+        if not self.cache_writable:
+            return None, False, False
+
+        cache_hit = False
+        budget_skipped = False
+        for url in variants:
+            now = time.time()
+            key = hashlib.sha256(f"{style}\0{station_id}\0{url}".encode()).hexdigest()
+            cached = self.cache.get(key)
+            if cached and cached[0] > now:
+                cache_hit = True
+                if cached[1]:
+                    return url, cache_hit, False
+                continue
+
+            status = self._request(url, "image/png", forbidden_missing=True)
+            if status in ("valid", "missing", "invalid"):
+                # Non-image responses and confirmed misses are negatives too, so
+                # a repeat refresh reuses them instead of probing again.
+                age = HIT_AGE if status == "valid" else MISS_AGE
+                self.cache[key] = [int(time.time()) + age, status == "valid"]
+                self.cache_dirty = True
+            if status == "valid":
+                return url, cache_hit, False
+            if status == "budget":
+                budget_skipped = True
+                continue
+            if status not in ("missing", "invalid"):
+                return None, cache_hit, False
+        return None, cache_hit, budget_skipped
+
+    def _resolve(self, icon, style, *, station, station_id=None, report=True):
         original = icon.get("src")
         if not original:
             return None
-        key = (original, style)
+        key = (original, style) if not station else (original, style, station_id)
         result = self.probed_assets.get(key)
         if result is None:
-            requests_before = self.requests
-            result = self._select(original, style, station)
-            if self.requests > requests_before:
+            if station:
+                requests_before = self.station_requests
+                result = self._select_station(station_id, original, style)
+                used_request = self.station_requests > requests_before
+            else:
+                requests_before = self.requests
+                result = self._select(original, style)
+                used_request = self.requests > requests_before
+            if used_request:
                 self.probed_assets[key] = result
         variant, cache_hit, budget_skipped = result
         if not self.cache_writable:
             variant = None
         if report:
-            self.selected += variant is not None
-            self.fallback += variant is None
-            self.cache_hits += cache_hit
-            self.budget_skipped += budget_skipped
+            if station:
+                self.station_selected += variant is not None
+                self.station_fallback += variant is None
+                self.station_cache_hits += cache_hit
+                self.station_budget_skipped += budget_skipped
+            else:
+                self.selected += variant is not None
+                self.fallback += variant is None
+                self.cache_hits += cache_hit
+                self.budget_skipped += budget_skipped
         return variant
 
     def prepare_mapped_logos(self, path, mapped_station_ids):
@@ -404,7 +500,10 @@ class ArtworkRefresh:
                     break
                 if element.tag == "channel" and element.get("id") in mapped_station_ids:
                     for icon in element.iterfind("icon"):
-                        self._resolve(icon, self.station_style, station=True, report=False)
+                        self._resolve(
+                            icon, self.station_style, station=True,
+                            station_id=element.get("id"), report=False,
+                        )
 
     def _write_guide(self, path, output, mapped_station_ids, *, select_variants=True):
         changed = False
@@ -426,7 +525,7 @@ class ArtworkRefresh:
                         style = self.programme_style
                     if style:
                         for icon in element.iterfind("icon"):
-                            variant = self._resolve(icon, style, station=station)
+                            variant = self._resolve(icon, style, station=station, station_id=element.get("id"))
                             if variant and variant != icon.get("src"):
                                 icon.set("src", variant)
                                 changed = True
@@ -456,10 +555,17 @@ class ArtworkRefresh:
                 _publish_output(output, path, stat.S_IMODE(path.stat().st_mode))
 
     def summary(self):
-        return (
+        parts = [
             f"artwork selected={self.selected} fallback={self.fallback} "
             f"cache-hit={self.cache_hits} budget-skipped={self.budget_skipped} "
             f"requests={self.requests} rate-limited={self.rate_limited} "
             f"cache-writable={self.cache_writable} "
-            f"request-limit={self.request_limit} reserved={self.reserved_requests}"
-        )
+            f"request-limit={self.request_limit}"
+        ]
+        if self.station_style:
+            parts.append(
+                f"station-logos selected={self.station_selected} fallback={self.station_fallback} "
+                f"cache-hit={self.station_cache_hits} budget-skipped={self.station_budget_skipped} "
+                f"requests={self.station_requests} request-limit={self.station_limit}"
+            )
+        return " ".join(parts)
