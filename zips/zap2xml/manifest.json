@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-26T15:44:49Z",
+  "generated_at": "2026-11-26T23:09:02Z",
   "manifest": {
     "slug": "zap2xml",
     "name": "Zap2XML",
@@ -7,19 +7,29 @@
     "author": "jesmannstl (fork: tylertufano)",
     "registry_url": "https://github.com/tylertufano/zap2xml_dispatcharr_plugin",
     "registry_name": "tylertufano/zap2xml_dispatcharr_plugin",
-    "last_updated": "2026-11-26T15:44:49Z",
+    "last_updated": "2026-11-26T23:09:02Z",
     "latest": {
-      "version": "2.1.4.7",
-      "url": "https://github.com/tylertufano/zap2xml_dispatcharr_plugin/releases/download/v2.1.4.7/zap2xml-v2.1.4.7.zip",
-      "checksum_md5": "a8ff389de141bc0542a10e303cf517e5",
-      "checksum_sha256": "b40188b1f3d658b6d5ede74f5b52a06706c48f01b12b076f645cf87cc121d653",
-      "size": 2331776,
-      "last_updated": "2026-11-26T15:44:49Z",
-      "build_timestamp": "2026-11-26T15:44:49Z",
+      "version": "2.1.4.8",
+      "url": "https://github.com/tylertufano/zap2xml_dispatcharr_plugin/releases/download/v2.1.4.8/zap2xml-v2.1.4.8.zip",
+      "checksum_md5": "2f21f7c9b69cf7951facf6bbdecd31de",
+      "checksum_sha256": "1768f8faddaeba277bed2ec74ad0d22cb4592a34a0f017105dd60cf6d33947ab",
+      "size": 2332464,
+      "last_updated": "2026-11-26T23:09:02Z",
+      "build_timestamp": "2026-11-26T23:09:02Z",
       "min_dispatcharr_version": "0.34.0",
-      "latest_url": "https://github.com/tylertufano/zap2xml_dispatcharr_plugin/releases/download/v2.1.4.7/zap2xml-v2.1.4.7.zip"
+      "latest_url": "https://github.com/tylertufano/zap2xml_dispatcharr_plugin/releases/download/v2.1.4.8/zap2xml-v2.1.4.8.zip"
     },
     "versions": [
+      {
+        "version": "2.1.4.8",
+        "url": "https://github.com/tylertufano/zap2xml_dispatcharr_plugin/releases/download/v2.1.4.8/zap2xml-v2.1.4.8.zip",
+        "checksum_md5": "2f21f7c9b69cf7951facf6bbdecd31de",
+        "checksum_sha256": "1768f8faddaeba277bed2ec74ad0d22cb4592a34a0f017105dd60cf6d33947ab",
+        "size": 2332464,
+        "last_updated": "2026-11-26T23:09:02Z",
+        "build_timestamp": "2026-11-26T23:09:02Z",
+        "min_dispatcharr_version": "0.34.0"
+      },
       {
         "version": "2.1.4.7",
         "url": "https://github.com/tylertufano/zap2xml_dispatcharr_plugin/releases/download/v2.1.4.7/zap2xml-v2.1.4.7.zip",
