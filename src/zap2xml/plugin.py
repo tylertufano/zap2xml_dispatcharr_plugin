@@ -82,7 +82,7 @@ def _save_download_state(path, state):
 
 class Plugin:
     name = "Zap2XML"
-    version = "2.1.4.5"
+    version = "2.1.4.6"
     description = "Create an XMLTV EPG from Zap2it (single or multiple lineups)."
 
     # Settings rendered by UI
@@ -178,6 +178,20 @@ class Plugin:
                 {"value": "square_iconic", "label": "Square Iconic (1:1)"},
             ],
             "help_text": "Choose an artwork style for listings on stations mapped to this guide.",
+        },
+        {
+            "id": "artwork_request_limit",
+            "label": "Artwork lookup request limit",
+            "type": "number",
+            "default": 128,
+            "help_text": "Maximum external artwork probes per refresh, shared by all lineups. 0 disables new probes and reuses cached results; wall-clock and socket deadlines still apply.",
+        },
+        {
+            "id": "poster_request_reservation_percent",
+            "label": "Poster request reservation (%)",
+            "type": "number",
+            "default": 25,
+            "help_text": "Percentage of the request budget kept for programme posters when styled artwork and mapped stations are active. 0 reserves none; any positive value keeps at least one slot. Time limits are separate.",
         },
         {
             "id": "confirm",

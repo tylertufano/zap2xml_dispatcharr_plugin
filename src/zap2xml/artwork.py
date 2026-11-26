@@ -37,12 +37,45 @@ PROGRAMME_PATH = re.compile(
 )
 IMAGE_SIGNATURES = {"image/png": b"\x89PNG\r\n\x1a\n", "image/jpeg": b"\xff\xd8\xff"}
 MAX_REQUESTS = 128
+DEFAULT_POSTER_RESERVATION_PERCENT = 25
 MAX_LOOKUP_SECONDS = 25
 REQUEST_SECONDS = 2
 CACHE_ENTRIES = 8192
 CACHE_READ_BYTES = 1024 * 1024
 HIT_AGE = 30 * 24 * 60 * 60
 MISS_AGE = 2 * 24 * 60 * 60
+
+
+def _whole_setting(value, default, minimum, maximum=None):
+    """Return a persisted whole-number setting, or the default if invalid.
+
+    Booleans, fractional numbers, non-decimal strings and out-of-range values
+    are invalid. Integral floats and decimal strings are accepted so a saved
+    form value round-trips to the same integer.
+    """
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        number = value
+    elif isinstance(value, float):
+        if not value.is_integer():
+            return default
+        number = int(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        # ASCII decimal only: str.isdigit() also accepts characters such as
+        # superscript ² that int() cannot parse or that are not decimal input.
+        if not re.fullmatch(r"[0-9]+", text):
+            return default
+        try:
+            number = int(text)
+        except ValueError:
+            return default
+    else:
+        return default
+    if number < minimum or (maximum is not None and number > maximum):
+        return default
+    return number
 
 
 def candidates(original, style, *, station):
@@ -143,6 +176,7 @@ class ArtworkRefresh:
     """
 
     def __init__(self, settings, cache_path):
+        settings = settings if isinstance(settings, dict) else {}
         station = settings.get("station_logo_style")
         programme = settings.get("programme_artwork_style")
         self.station_style = STATION_STYLES.get(station) if isinstance(station, str) else None
@@ -150,6 +184,13 @@ class ArtworkRefresh:
         self.include_programme = settings.get("include_programme_artwork") is not False
         if not self.include_programme:
             self.programme_style = None
+        self.request_limit = _whole_setting(
+            settings.get("artwork_request_limit"), MAX_REQUESTS, 0,
+        )
+        self.poster_reservation_percent = _whole_setting(
+            settings.get("poster_request_reservation_percent"),
+            DEFAULT_POSTER_RESERVATION_PERCENT, 0, 100,
+        )
 
         self.cache_path = cache_path
         self.cache = {}
@@ -178,6 +219,13 @@ class ArtworkRefresh:
     @property
     def uses_mappings(self):
         return bool(self.station_style or self.programme_style)
+
+    @property
+    def reserved_requests(self):
+        """Request slots kept for programme posters when the reservation applies."""
+        if not self.reserve_programme or self.poster_reservation_percent <= 0 or self.request_limit <= 0:
+            return 0
+        return max(1, (self.request_limit * self.poster_reservation_percent) // 100)
 
     def _load_cache(self):
         self.cache_loaded = True
@@ -227,11 +275,10 @@ class ArtworkRefresh:
         station = content_type == "image/png"
         remaining = MAX_LOOKUP_SECONDS - self.lookup_seconds
         if station and self.reserve_programme:
-            reserved_requests = max(1, MAX_REQUESTS // 4)
-            if self.station_requests >= MAX_REQUESTS - reserved_requests:
+            if self.station_requests >= self.request_limit - self.reserved_requests:
                 return "budget"
             remaining = min(remaining, MAX_LOOKUP_SECONDS * 2 / 3 - self.station_seconds)
-        if self.requests >= MAX_REQUESTS or remaining <= 0 or content_type in self.timed_out_types:
+        if self.requests >= self.request_limit or remaining <= 0 or content_type in self.timed_out_types:
             return "budget"
 
         limit = min(REQUEST_SECONDS, remaining)
@@ -289,6 +336,7 @@ class ArtworkRefresh:
                 for host in LEGACY_ASSET_HOSTS
                 for scheme in ("https", "http")
             )
+        budget_skipped = False
         for url in variants:
             now = time.time()
             key = hashlib.sha256(f"{cache_style}\0{original}\0{url}".encode()).hexdigest()
@@ -315,9 +363,14 @@ class ArtworkRefresh:
                 self.cache_dirty = True
             if status == "valid":
                 return url, cache_hit, False
+            if status == "budget":
+                # A higher-priority variant may not be cached; keep checking
+                # the rest for an eligible cached result before falling back.
+                budget_skipped = True
+                continue
             if status not in ("missing", "invalid"):
-                return None, cache_hit, status == "budget"
-        return None, cache_hit, False
+                return None, cache_hit, False
+        return None, cache_hit, budget_skipped
 
     def _resolve(self, icon, style, *, station, report=True):
         original = icon.get("src")
@@ -407,5 +460,6 @@ class ArtworkRefresh:
             f"artwork selected={self.selected} fallback={self.fallback} "
             f"cache-hit={self.cache_hits} budget-skipped={self.budget_skipped} "
             f"requests={self.requests} rate-limited={self.rate_limited} "
-            f"cache-writable={self.cache_writable}"
+            f"cache-writable={self.cache_writable} "
+            f"request-limit={self.request_limit} reserved={self.reserved_requests}"
         )
