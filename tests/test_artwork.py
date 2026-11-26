@@ -402,8 +402,8 @@ class ArtworkTests(unittest.TestCase):
                 url = POSTER.replace("21040818", str(asset))
                 fixture.write(f'<programme channel="32645"><icon src="{url}" /></programme>'.encode())
             fixture.write(b"</tv>")
-        refresh = self.refresh(programme_artwork_style="landscape_iconic")
         with patch.object(artwork, "MAX_REQUESTS", 1):
+            refresh = self.refresh(programme_artwork_style="landscape_iconic")
             refresh.apply(self.path, {"32645"})
         self.assertEqual(refresh.budget_skipped, 499)
         self.assertEqual(len(refresh.probed_assets), 1)
@@ -472,6 +472,104 @@ class ArtworkTests(unittest.TestCase):
             icon_urls(self.path, "channel")["32645"],
             "https://dshm.tmsimg.com/h3/NowShowing/1/s1_ll_h15_ab.png",
         )
+
+
+    def test_default_request_budget_and_poster_reservation(self):
+        refresh = self.refresh()
+        self.assertEqual(refresh.request_limit, 128)
+        self.assertEqual(refresh.poster_reservation_percent, 25)
+        refresh.reserve_programme = True
+        self.assertEqual(refresh.reserved_requests, 32)
+        self.assertIn("request-limit=128 reserved=32", refresh.summary())
+
+    def test_request_limit_above_default(self):
+        refresh = self.refresh(artwork_request_limit=200)
+        self.assertEqual(refresh.request_limit, 200)
+        for _ in range(129):
+            self.assertEqual(refresh._request(ESPN, "image/png"), "valid")
+        self.assertEqual(refresh.requests, 129)
+
+    def test_zero_request_limit_reuses_cached_variants(self):
+        expires = int(artwork.time.time()) + 60
+        self.cache.write_text(json.dumps({
+            hashlib.sha256(f"i_h9\0{POSTER}\0{ICONIC}".encode()).hexdigest(): [expires, True],
+        }))
+        refresh = self.refresh(programme_artwork_style="landscape_iconic", artwork_request_limit=0)
+        refresh.reserve_programme = True
+        refresh.apply(self.path, {"32645"})
+        self.assertEqual(icon_urls(self.path, "programme")["32645"], ICONIC)
+        self.probe.assert_not_called()
+        self.assertEqual(refresh.requests, 0)
+
+    def test_poster_reservation_custom_zero_and_full(self):
+        for percent, reserved in ((50, 1), (0, 0), (100, 2)):
+            refresh = self.refresh(artwork_request_limit=2, poster_request_reservation_percent=percent)
+            refresh.reserve_programme = True
+            with self.subTest(percent=percent):
+                self.assertEqual(refresh.reserved_requests, reserved)
+        refresh = self.refresh(artwork_request_limit=2, poster_request_reservation_percent=50)
+        refresh.reserve_programme = True
+        self.assertEqual(refresh._request(ESPN, "image/png"), "valid")
+        self.assertEqual(refresh._request(ESPN, "image/png"), "budget")
+        refresh = self.refresh(artwork_request_limit=2, poster_request_reservation_percent=100)
+        refresh.reserve_programme = True
+        self.assertEqual(refresh._request(ESPN, "image/png"), "budget")
+        refresh = self.refresh(artwork_request_limit=2, poster_request_reservation_percent=0)
+        refresh.reserve_programme = True
+        for _ in range(2):
+            self.assertEqual(refresh._request(ESPN, "image/png"), "valid")
+        self.assertEqual(refresh._request(ESPN, "image/png"), "budget")
+
+    def test_invalid_request_settings_use_defaults(self):
+        for value in (True, False, 12.5, -1, "abc", "12.5", "\u00b2", "\u0661\u0662", "", "  ", None, [], {}):
+            with self.subTest(value=value):
+                refresh = self.refresh(artwork_request_limit=value, poster_request_reservation_percent=value)
+                self.assertEqual(refresh.request_limit, 128)
+                self.assertEqual(refresh.poster_reservation_percent, 25)
+        for value in (-1, 101, 25.5, True, "101"):
+            with self.subTest(reservation=value):
+                refresh = self.refresh(poster_request_reservation_percent=value)
+                self.assertEqual(refresh.poster_reservation_percent, 25)
+        self.assertEqual(self.refresh(artwork_request_limit="200").request_limit, 200)
+        self.assertEqual(self.refresh(poster_request_reservation_percent="0").poster_reservation_percent, 0)
+
+    def test_whole_setting_rejects_invalid_persisted_strings(self):
+        for value in ("", " ", "abc", "12.5", "-1", "+1", "1 2", "\u00b2", "\u0661\u0662", "1\u00b2"):
+            with self.subTest(value=value):
+                self.assertEqual(artwork._whole_setting(value, 128, 0), 128)
+                self.assertEqual(artwork._whole_setting(value, 25, 0, 100), 25)
+        self.assertEqual(artwork._whole_setting(" 0 ", 128, 0), 0)
+        self.assertEqual(artwork._whole_setting(" 200 ", 128, 0), 200)
+
+    def test_reservation_requires_styled_programme_artwork(self):
+        refresh = self.refresh(
+            programme_artwork_style="provider_default",
+            include_programme_artwork=True,
+            poster_request_reservation_percent=50,
+        )
+        self.assertFalse(refresh.reserve_programme)
+        self.assertEqual(refresh.reserved_requests, 0)
+        refresh = self.refresh(
+            programme_artwork_style="landscape_iconic",
+            include_programme_artwork=False,
+            poster_request_reservation_percent=50,
+        )
+        self.assertFalse(refresh.reserve_programme)
+        self.assertEqual(refresh.reserved_requests, 0)
+
+    def test_one_request_cap_is_shared_across_outputs(self):
+        refresh = self.refresh(station_logo_style="white", artwork_request_limit=2)
+        refresh.apply(self.path, set())
+        self.assertEqual(refresh.requests, 2)
+        other = self.root / "other.xml"
+        channels = [
+            grid_channel("11111", "Other", "https://zpmc.tmsimg.com/h3/NowShowing/11111/s11111_ll_h15_ab.png"),
+            grid_channel("22222", "Other2", "https://zpmc.tmsimg.com/h3/NowShowing/22222/s22222_ll_h15_ab.png", asset_id=28711),
+        ]
+        zap2xml.write_xmltv(channels, other)
+        refresh.apply(other, set())
+        self.assertLessEqual(refresh.requests, 2)
+        self.assertGreater(refresh.budget_skipped, 0)
 
 
 class ProgrammeIconTests(unittest.TestCase):
