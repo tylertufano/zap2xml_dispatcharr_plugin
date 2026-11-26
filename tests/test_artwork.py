@@ -521,7 +521,7 @@ class ArtworkTests(unittest.TestCase):
         self.assertEqual(refresh._request(ESPN, "image/png"), "budget")
 
     def test_invalid_request_settings_use_defaults(self):
-        for value in (True, False, 12.5, -1, "abc", "12.5", None, [], {}):
+        for value in (True, False, 12.5, -1, "abc", "12.5", "\u00b2", "\u0661\u0662", "", "  ", None, [], {}):
             with self.subTest(value=value):
                 refresh = self.refresh(artwork_request_limit=value, poster_request_reservation_percent=value)
                 self.assertEqual(refresh.request_limit, 128)
@@ -532,6 +532,14 @@ class ArtworkTests(unittest.TestCase):
                 self.assertEqual(refresh.poster_reservation_percent, 25)
         self.assertEqual(self.refresh(artwork_request_limit="200").request_limit, 200)
         self.assertEqual(self.refresh(poster_request_reservation_percent="0").poster_reservation_percent, 0)
+
+    def test_whole_setting_rejects_invalid_persisted_strings(self):
+        for value in ("", " ", "abc", "12.5", "-1", "+1", "1 2", "\u00b2", "\u0661\u0662", "1\u00b2"):
+            with self.subTest(value=value):
+                self.assertEqual(artwork._whole_setting(value, 128, 0), 128)
+                self.assertEqual(artwork._whole_setting(value, 25, 0, 100), 25)
+        self.assertEqual(artwork._whole_setting(" 0 ", 128, 0), 0)
+        self.assertEqual(artwork._whole_setting(" 200 ", 128, 0), 200)
 
     def test_reservation_requires_styled_programme_artwork(self):
         refresh = self.refresh(

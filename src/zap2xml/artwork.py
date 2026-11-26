@@ -63,9 +63,14 @@ def _whole_setting(value, default, minimum, maximum=None):
         number = int(value)
     elif isinstance(value, str):
         text = value.strip()
-        if not text.isdigit():
+        # ASCII decimal only: str.isdigit() also accepts characters such as
+        # superscript ² that int() cannot parse or that are not decimal input.
+        if not re.fullmatch(r"[0-9]+", text):
             return default
-        number = int(text)
+        try:
+            number = int(text)
+        except ValueError:
+            return default
     else:
         return default
     if number < minimum or (maximum is not None and number > maximum):
