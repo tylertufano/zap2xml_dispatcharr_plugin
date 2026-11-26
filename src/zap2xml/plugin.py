@@ -82,7 +82,7 @@ def _save_download_state(path, state):
 
 class Plugin:
     name = "Zap2XML"
-    version = "2.1.4.7"
+    version = "2.1.4.8"
     description = "Create an XMLTV EPG from Zap2it (single or multiple lineups)."
 
     # Settings rendered by UI
@@ -1051,6 +1051,50 @@ class Plugin:
 # Lightweight background scheduler
 _SCHEDULER_THREAD = None
 _SCHEDULER_LOCK = threading.Lock()
+_DB_BUSY_WARNING_INTERVAL = 3600
+_db_busy_warned_at = 0.0  # time.monotonic() of the last "database pool busy" warning
+
+
+class _DatabaseBusy(Exception):
+    """The DB pool had no connection to hand out; retry on the next tick."""
+
+
+def _django_db():
+    """django.db, or None outside Django (the test suite runs without it)."""
+    try:
+        from django import db
+    except Exception:
+        return None
+    return db
+
+
+def _connection_errors():
+    """Exceptions that mean "getting a DB connection failed", when Django is loaded."""
+    db = _django_db()
+    error = getattr(db, "OperationalError", None) if db is not None else None
+    return (error,) if isinstance(error, type) else ()
+
+
+def _pool_busy(exc):
+    """True for the transient "no pooled DB connection available" failures."""
+    if isinstance(exc, _DatabaseBusy):
+        return True
+    try:
+        from gevent.exceptions import LoopExit
+    except ImportError:
+        return False
+    return isinstance(exc, LoopExit)
+
+
+def _warn_database_busy(logger):
+    """One warning line, without a traceback, at most once per hour per process."""
+    global _db_busy_warned_at
+    now = time.monotonic()
+    if _db_busy_warned_at and now - _db_busy_warned_at < _DB_BUSY_WARNING_INTERVAL:
+        return
+    _db_busy_warned_at = now
+    logger.warning("[zap2xml] Scheduler: database pool busy; retrying next minute")
+
 
 def _ensure_scheduler_started():
     global _SCHEDULER_THREAD
@@ -1064,14 +1108,32 @@ def _ensure_scheduler_started():
 def _scheduler_tick(logger):
     from apps.plugins.models import PluginConfig
 
-    cfg = PluginConfig.objects.filter(key=_plugin_key()).first()
-    if not cfg or not cfg.enabled:
-        return
-    result = Plugin()._download({}, {"settings": cfg.settings or {}, "logger": logger}, scheduled=True)
-    if result and result.get("status") == "error":
-        logger.warning("[zap2xml] Auto-download failed: %s", result["message"])
-    elif result and result.get("status") == "skipped":
-        logger.info("[zap2xml] Auto-download skipped: %s", result["message"])
+    # This thread's ORM work runs outside Django's request/task cycle, so its
+    # connection must go back to the pool at the end of every tick.
+    db = _django_db()
+    if db is not None:
+        try:
+            db.close_old_connections()
+        except Exception:
+            pass
+    try:
+        try:
+            cfg = PluginConfig.objects.filter(key=_plugin_key()).first()
+        except _connection_errors() as exc:
+            raise _DatabaseBusy(str(exc)) from exc
+        if not cfg or not cfg.enabled:
+            return
+        result = Plugin()._download({}, {"settings": cfg.settings or {}, "logger": logger}, scheduled=True)
+        if result and result.get("status") == "error":
+            logger.warning("[zap2xml] Auto-download failed: %s", result["message"])
+        elif result and result.get("status") == "skipped":
+            logger.info("[zap2xml] Auto-download skipped: %s", result["message"])
+    finally:
+        if db is not None:
+            try:
+                db.connection.close()
+            except Exception:
+                pass
 
 
 def _scheduler_loop():
@@ -1081,8 +1143,11 @@ def _scheduler_loop():
     while True:
         try:
             _scheduler_tick(logger)
-        except Exception:
-            logger.exception("[zap2xml] Scheduler loop error")
+        except Exception as exc:
+            if _pool_busy(exc):
+                _warn_database_busy(logger)
+            else:
+                logger.exception("[zap2xml] Scheduler loop error")
         time.sleep(60)
 
 

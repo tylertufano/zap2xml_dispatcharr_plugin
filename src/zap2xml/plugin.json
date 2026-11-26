@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "Zap2XML",
-  "version": "2.1.4.7",
+  "version": "2.1.4.8",
   "description": "Create an XMLTV EPG from Zap2it (single or multiple lineups).\n\nFORK BUILD (tylertufano): adds lineup channel numbers to Gracenote station display names and serializes downloads across Dispatcharr worker processes.",
   "author": "jesmannstl (fork: tylertufano)",
   "help_url": "https://github.com/tylertufano/zap2xml_dispatcharr_plugin/blob/tufanito/README.md",
