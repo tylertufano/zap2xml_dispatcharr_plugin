@@ -23,6 +23,8 @@ Dispatcharr worker processes. Install updates from the plugin repository:
 
 `https://raw.githubusercontent.com/tylertufano/zap2xml_dispatcharr_plugin/tufanito/manifest.json`
 
+Maintainers: [RELEASING.md](RELEASING.md) covers packaging, tagging and the automated release.
+
 
 
 ### **Usage**

@@ -1,0 +1,40 @@
+name: CI
+
+# Read-only checks. Publishing lives in release.yml, which is the only workflow
+# with write access to the repository.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests and reproducible package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+
+      - name: Install test dependencies
+        run: python3 -m pip install --disable-pip-version-check requests
+
+      - name: Run unit tests
+        run: python3 -m unittest discover -s tests -v
+
+      # A packaging PR bumps plugin.json and rewrites both manifests with the new
+      # zip's sha256. Rebuilding here proves the committed zip is reproducible and
+      # that the manifests advertise its real checksum. Before a bump lands, the
+      # manifests list no entry for the new version and the check is skipped.
+      - name: Verify the packaged ZIP is reproducible
+        run: |
+          version=$(python3 -c 'import json; print(json.load(open("src/zap2xml/plugin.json"))["version"])')
+          python3 scripts/build_fork_release.py "$version" --check

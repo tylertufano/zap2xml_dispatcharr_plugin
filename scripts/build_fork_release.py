@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
 """Build a reproducible Zap2XML fork release and its plugin-repository manifests.
 
-Usage: python3 scripts/build_fork_release.py VERSION
+Usage: python3 scripts/build_fork_release.py VERSION [--out DIR] [--check]
   e.g. python3 scripts/build_fork_release.py 2.1.4.1
+
+With no options the script packages a release: it writes the version into
+``plugin.py`` and ``plugin.json`` and rewrites both manifests. ``--out`` builds
+the ZIP into DIR and changes no tracked file; ``--check`` rebuilds it into
+``--out`` (or a temporary directory) and fails when the result's sha256
+disagrees with the checksum the committed manifests advertise for VERSION.
 
 The plugin is installed under the existing ``zap2xml`` slug. The release ZIP is
 flat and contains only the files Dispatcharr needs from ``src/zap2xml``.
 """
 
+import argparse
 import datetime
 import hashlib
 import json
 import re
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -72,6 +80,53 @@ def reproducible_zip(path: Path) -> None:
             )
 
 
+def build_zip(destination: Path) -> bytes:
+    """Write the release ZIP to `destination` from the committed tree; change nothing else."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    reproducible_zip(destination)
+    return destination.read_bytes()
+
+
+def published_checksums(version: str) -> dict[str, str]:
+    """The sha256 each committed manifest advertises for `version`, keyed by where it appears."""
+    checksums = {}
+    per_plugin_path = ROOT / "zips" / SLUG / "manifest.json"
+    if per_plugin_path.exists():
+        name = str(per_plugin_path.relative_to(ROOT))
+        manifest = json.loads(per_plugin_path.read_text(encoding="utf-8")).get("manifest", {})
+        latest = manifest.get("latest") or {}
+        if latest.get("version") == version and latest.get("checksum_sha256"):
+            checksums[f"{name} latest"] = latest["checksum_sha256"]
+        for entry in manifest.get("versions", []):
+            if entry.get("version") == version and entry.get("checksum_sha256"):
+                checksums[f"{name} versions[{version}]"] = entry["checksum_sha256"]
+    root_path = ROOT / "manifest.json"
+    if root_path.exists():
+        name = str(root_path.relative_to(ROOT))
+        manifest = json.loads(root_path.read_text(encoding="utf-8")).get("manifest", {})
+        for entry in manifest.get("plugins", []):
+            if entry.get("latest_version") == version and entry.get("latest_sha256"):
+                checksums[f"{name} plugins[{entry.get('slug', '?')}]"] = entry["latest_sha256"]
+    return checksums
+
+
+def check_zip(version: str, zip_path: Path) -> None:
+    """Fail unless `zip_path` hashes to what the manifests advertise for `version`."""
+    data = zip_path.read_bytes()
+    actual = hashlib.sha256(data).hexdigest()
+    expected = published_checksums(version)
+    if not expected:
+        print(f"check: no committed manifest lists {version}; checksum comparison skipped")
+        return
+    wrong = {path: sha for path, sha in expected.items() if sha != actual}
+    if wrong:
+        details = "\n".join(f"  {path}: {sha}" for path, sha in wrong.items())
+        raise SystemExit(
+            f"check: rebuilt {zip_path.name} is {actual} ({len(data)} bytes); the manifests expect:\n{details}"
+        )
+    print(f"check: {zip_path.name} matches {', '.join(sorted(expected))} ({actual})")
+
+
 def earlier_versions(manifest_path: Path, version: str) -> list[dict]:
     if not manifest_path.exists():
         return []
@@ -84,11 +139,32 @@ def earlier_versions(manifest_path: Path, version: str) -> list[dict]:
     ]
 
 
-def main() -> None:
-    if len(sys.argv) != 2 or not re.fullmatch(r"[0-9]+(?:\.[0-9]+){3}", sys.argv[1]):
-        raise SystemExit("usage: build_fork_release.py VERSION (four numeric parts, e.g. 2.1.4.1)")
-    version = sys.argv[1]
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Build a reproducible Zap2XML release and its plugin-repository manifests.",
+    )
+    parser.add_argument("version", type=version_arg, help="four numeric parts, e.g. 2.1.4.1")
+    parser.add_argument(
+        "--out",
+        metavar="DIR",
+        help="write only the release ZIP into DIR and change no tracked file",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="rebuild the ZIP into --out (or a temporary directory) and fail when its sha256 "
+        "differs from the checksum the committed manifests list for this version",
+    )
+    return parser.parse_args(argv)
 
+
+def version_arg(value: str) -> str:
+    if not re.fullmatch(r"[0-9]+(?:\.[0-9]+){3}", value):
+        raise argparse.ArgumentTypeError("four numeric parts, e.g. 2.1.4.1")
+    return value
+
+
+def package(version: str) -> None:
     plugin_path = SOURCE / "plugin.py"
     plugin_source = plugin_path.read_text(encoding="utf-8")
     plugin_source, replacements = re.subn(
@@ -107,9 +183,7 @@ def main() -> None:
     write_json(plugin_json_path, plugin_json)
 
     zip_path = ROOT / "dist" / f"{SLUG}-v{version}.zip"
-    zip_path.parent.mkdir(parents=True, exist_ok=True)
-    reproducible_zip(zip_path)
-    data = zip_path.read_bytes()
+    data = build_zip(zip_path)
     now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace(
         "+00:00", "Z"
     )
@@ -178,6 +252,35 @@ def main() -> None:
         f"sha256 {entry['checksum_sha256']}; "
         f"manifests updated; {len(versions) - 1} earlier version(s) kept"
     )
+
+
+def main() -> None:
+    args = parse_args(sys.argv[1:])
+    version = args.version
+
+    if args.out is None and not args.check:
+        package(version)
+        return
+
+    declared = json.loads((SOURCE / "plugin.json").read_text(encoding="utf-8"))["version"]
+    if declared != version:
+        raise SystemExit(
+            f"plugin.json declares {declared}, not {version}; --out and --check build the "
+            "committed tree as it stands, so pass the version already packaged there"
+        )
+
+    if args.out is not None:
+        zip_path = Path(args.out) / f"{SLUG}-v{version}.zip"
+        data = build_zip(zip_path)
+        print(f"built {zip_path}: {len(data)} bytes, sha256 {hashlib.sha256(data).hexdigest()}")
+        if args.check:
+            check_zip(version, zip_path)
+        return
+
+    with tempfile.TemporaryDirectory() as tmp:
+        zip_path = Path(tmp) / f"{SLUG}-v{version}.zip"
+        build_zip(zip_path)
+        check_zip(version, zip_path)
 
 
 if __name__ == "__main__":
